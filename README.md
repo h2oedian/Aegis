@@ -17,3 +17,9 @@ an appropriate response.
 2. Run `docker compose up --build`.
 3. Open `http://localhost:8000/api/health/`.
 
+## Request telemetry
+
+`RequestTelemetryMiddleware` stores non-sensitive request metadata in
+PostgreSQL: path, method, response status, duration, client IP, user agent,
+authenticated user, and token JTI. Request bodies, cookies, credentials, and
+raw tokens are deliberately excluded.

@@ -31,6 +31,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "aegis_core.middleware.RequestTelemetryMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -78,3 +79,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 
+# Forwarded client IPs are trustworthy only behind a correctly configured proxy.
+AEGIS_TRUST_PROXY_HEADERS = (
+    os.getenv("AEGIS_TRUST_PROXY_HEADERS", "false").lower() == "true"
+)
