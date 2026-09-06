@@ -19,7 +19,12 @@ an appropriate response.
 
 ## Request telemetry
 
-`RequestTelemetryMiddleware` stores non-sensitive request metadata in
-PostgreSQL: path, method, response status, duration, client IP, user agent,
-authenticated user, and token JTI. Request bodies, cookies, credentials, and
-raw tokens are deliberately excluded.
+`RequestTelemetryMiddleware` publishes non-sensitive metadata to a bounded
+Redis Stream. A Celery task consumes the stream in batches and persists it to
+PostgreSQL. Messages are acknowledged only after storage, and unique stream
+IDs make retries idempotent. If Redis is unavailable, telemetry fails open so
+the protected API remains available.
+
+Stored fields include path, method, response status, duration, client IP, user
+agent, authenticated user, and token JTI. Request bodies, cookies, credentials,
+and raw tokens are deliberately excluded.

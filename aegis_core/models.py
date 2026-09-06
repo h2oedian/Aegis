@@ -1,8 +1,10 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class RequestLog(models.Model):
+    stream_id = models.CharField(max_length=64, null=True, unique=True, editable=False)
     path = models.CharField(max_length=2048, db_index=True)
     method = models.CharField(max_length=10, db_index=True)
     status_code = models.PositiveSmallIntegerField(db_index=True)
@@ -17,7 +19,7 @@ class RequestLog(models.Model):
         related_name="aegis_request_logs",
     )
     token_jti = models.CharField(max_length=255, blank=True, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
 
     class Meta:
         ordering = ("-created_at",)

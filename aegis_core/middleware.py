@@ -2,15 +2,15 @@ import logging
 import time
 
 from django.conf import settings
-from django.db import DatabaseError
+from redis.exceptions import RedisError
 
-from .models import RequestLog
+from .redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 
 
 class RequestTelemetryMiddleware:
-    """Persist non-sensitive request metadata for later security analysis."""
+    """Publish non-sensitive request metadata without blocking the API."""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -30,22 +30,29 @@ class RequestTelemetryMiddleware:
     def _store(self, request, status_code, started_at):
         duration_ms = (time.perf_counter() - started_at) * 1000
         user = getattr(request, "user", None)
-        authenticated_user = user if getattr(user, "is_authenticated", False) else None
+        user_id = str(user.pk) if getattr(user, "is_authenticated", False) else ""
 
         try:
-            RequestLog.objects.create(
-                path=request.path[:2048],
-                method=request.method[:10],
-                status_code=status_code,
-                duration_ms=duration_ms,
-                ip_address=self._client_ip(request),
-                user_agent=request.META.get("HTTP_USER_AGENT", "")[:1024],
-                user=authenticated_user,
-                token_jti=self._token_jti(request),
+            get_redis_client().xadd(
+                settings.AEGIS_REQUEST_STREAM,
+                {
+                    "occurred_at_ms": str(time.time_ns() // 1_000_000),
+                    "path": request.path[:2048],
+                    "method": request.method[:10],
+                    "status_code": str(status_code),
+                    "duration_ms": f"{duration_ms:.6f}",
+                    "ip_address": self._client_ip(request) or "",
+                    "user_agent": request.META.get("HTTP_USER_AGENT", "")[:1024],
+                    "user_id": user_id,
+                    "token_jti": self._token_jti(request),
+                },
+                maxlen=settings.AEGIS_REQUEST_STREAM_MAX_LENGTH,
+                approximate=True,
             )
-        except DatabaseError:
-            # Telemetry must never make the protected API unavailable.
-            logger.exception("Could not persist request telemetry")
+        except RedisError as exc:
+            # Security telemetry is fail-open: an unavailable Redis must not
+            # make the protected API unavailable.
+            logger.warning("Could not publish request telemetry: %s", exc)
 
     @staticmethod
     def _client_ip(request):

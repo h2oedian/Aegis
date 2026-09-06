@@ -78,6 +78,27 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_BEAT_SCHEDULE = {
+    "consume-request-stream": {
+        "task": "aegis_core.tasks.consume_request_stream",
+        "schedule": 1.0,
+    }
+}
+
+AEGIS_REQUEST_STREAM = os.getenv("AEGIS_REQUEST_STREAM", "aegis:requests")
+AEGIS_REQUEST_CONSUMER_GROUP = os.getenv(
+    "AEGIS_REQUEST_CONSUMER_GROUP", "aegis-request-loggers"
+)
+AEGIS_REQUEST_STREAM_MAX_LENGTH = int(
+    os.getenv("AEGIS_REQUEST_STREAM_MAX_LENGTH", "100000")
+)
+AEGIS_REQUEST_BATCH_SIZE = int(os.getenv("AEGIS_REQUEST_BATCH_SIZE", "100"))
+AEGIS_REQUEST_CLAIM_IDLE_MS = int(
+    os.getenv("AEGIS_REQUEST_CLAIM_IDLE_MS", "60000")
+)
+AEGIS_REDIS_SOCKET_TIMEOUT_SECONDS = float(
+    os.getenv("AEGIS_REDIS_SOCKET_TIMEOUT_SECONDS", "0.01")
+)
 
 # Forwarded client IPs are trustworthy only behind a correctly configured proxy.
 AEGIS_TRUST_PROXY_HEADERS = (
