@@ -14,8 +14,9 @@ from django.http import HttpResponse
 from django.test import RequestFactory, TestCase, override_settings
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from aegis_core.audit import verify_chain
 from aegis_core.fingerprint import compute_fingerprint
-from aegis_core.models import RequestLog
+from aegis_core.models import AuditLog, RequestLog
 from aegis_core.paths import normalize_path
 from aegis_core.rate_limiter import RateLimitDecision
 from aegis_core.tokens import issue_initial_pair
@@ -786,6 +787,18 @@ class AdaptiveResponseMiddlewareEnforcingTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"], "temporarily_blocked")
         ban.assert_called_once()
+
+    def test_attack_tier_block_records_an_audit_event(self):
+        attack_decision = Decision(score=95.0, tier=TIER_ATTACK, rule_score=95.0, model_score=0.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=attack_decision), patch(
+            "aegis_ml.middleware.DecisionEngine.is_banned", return_value=False
+        ), patch("aegis_ml.middleware.DecisionEngine.ban"):
+            self.client.get("/api/health/")
+
+        event = AuditLog.objects.get(event_type="attack_blocked")
+        self.assertEqual(event.payload["ip_address"], "127.0.0.1")
+        self.assertEqual(event.payload["score"], 95.0)
+        self.assertTrue(verify_chain().valid)
 
     def test_already_banned_ip_is_rejected_without_recomputing_a_decision(self):
         with patch("aegis_ml.middleware.DecisionEngine.is_banned", return_value=True), patch(

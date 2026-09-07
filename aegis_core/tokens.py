@@ -7,6 +7,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
+from .audit import record_event
 from .models import RefreshTokenRecord
 from .token_denylist import deny_family, deny_jti, is_family_revoked, is_jti_denied
 
@@ -70,18 +71,18 @@ def rotate_refresh_token(raw_refresh_token: str) -> TokenPair:
         raise TokenTheftDetected("Refresh token is missing its family claim")
 
     if is_jti_denied(jti) or is_family_revoked(family_id):
-        _revoke_family(family_id)
+        _revoke_family(family_id, reason="refresh token reuse detected (denylist)", jti=jti)
         raise TokenTheftDetected(f"Refresh token reuse detected for family {family_id}")
 
     try:
         record = RefreshTokenRecord.objects.get(jti=jti)
     except RefreshTokenRecord.DoesNotExist:
         # Signed correctly but unknown to us -- treat it the same as theft.
-        _revoke_family(family_id)
+        _revoke_family(family_id, reason="unknown refresh token", jti=jti)
         raise TokenTheftDetected(f"Unknown refresh token for family {family_id}")
 
     if record.used_at is not None or record.revoked_at is not None:
-        _revoke_family(family_id)
+        _revoke_family(family_id, reason="refresh token reuse detected", jti=jti)
         raise TokenTheftDetected(f"Refresh token reuse detected for family {family_id}")
 
     record.used_at = timezone.now()
@@ -91,11 +92,15 @@ def rotate_refresh_token(raw_refresh_token: str) -> TokenPair:
     return _issue_pair(record.user, family_id, fingerprint=record.fingerprint)
 
 
-def _revoke_family(family_id: str) -> None:
+def _revoke_family(family_id: str, *, reason: str, jti: str) -> None:
     RefreshTokenRecord.objects.filter(family_id=family_id, revoked_at__isnull=True).update(
         revoked_at=timezone.now()
     )
     deny_family(family_id)
+    record_event(
+        "token_family_revoked",
+        {"family_id": family_id, "reason": reason, "jti": jti},
+    )
 
 
 @dataclass(frozen=True)

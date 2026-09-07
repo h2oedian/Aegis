@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import RefreshTokenRecord, RequestLog
+from .models import AuditLog, RefreshTokenRecord, RequestLog
 
 
 @admin.register(RequestLog)
@@ -33,6 +33,25 @@ class RequestLogAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "event_type", "hash")
+    list_filter = ("event_type", "created_at")
+    search_fields = ("event_type", "hash", "previous_hash")
+    readonly_fields = ("event_type", "payload", "created_at", "previous_hash", "hash")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Deleting a row (even the tail) is exactly the tampering this log
+        # exists to detect -- verify_audit_log is how you'd notice it did.
         return False
 
 

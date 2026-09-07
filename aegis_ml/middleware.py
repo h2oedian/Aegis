@@ -3,6 +3,7 @@ import logging
 from django.conf import settings
 from django.http import JsonResponse
 
+from aegis_core.audit import record_event
 from aegis_core.fingerprint import compute_fingerprint
 from aegis_core.rate_limiter import TokenBucketRateLimiter
 from aegis_core.request_meta import client_ip
@@ -63,6 +64,15 @@ class AdaptiveResponseMiddleware:
         if decision.tier == TIER_ATTACK:
             if ip_address:
                 self._decisions.ban(ip_address)
+                record_event(
+                    "attack_blocked",
+                    {
+                        "ip_address": ip_address,
+                        "score": decision.score,
+                        "rule_score": decision.rule_score,
+                        "model_score": decision.model_score,
+                    },
+                )
             return self._blocked_response("temporarily_blocked", decision.score)
 
         if decision.tier == TIER_RISKY:

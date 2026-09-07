@@ -332,3 +332,38 @@ view. So the middleware takes a best-effort, unauthenticated peek at the
 Authorization header (`aegis_core.tokens.peek_access_token`) purely to feed
 these two risk signals; it never grants access on the strength of that peek
 -- enforcement is still entirely `FamilyAwareJWTAuthentication`'s job.
+
+## Tamper-evident audit log
+
+`aegis_core.audit.record_event(event_type, payload)` appends one row to
+`AuditLog`. Each row embeds the previous row's `hash` as its own
+`previous_hash` before hashing its own content
+(`event_type` + `payload` + `created_at` + `previous_hash`, canonical JSON,
+SHA-256) -- so altering or deleting any past row breaks every hash after it.
+The first row chains off a well-known genesis hash (64 zeros). Writing is
+wrapped in `transaction.atomic()` with `select_for_update()` on the current
+tail row, so two concurrent events can't both read the same "previous" hash
+and fork the chain.
+
+```bash
+python manage.py verify_audit_log
+```
+
+Walks the chain in order, re-deriving and re-linking every hash. On the
+first row that doesn't fit -- its `previous_hash` doesn't match the prior
+row's `hash` (a row was inserted, deleted, or reordered), or its stored
+`hash` doesn't match what its own content recomputes to (a row was edited
+in place) -- it reports that row's id, event type, and timestamp as the
+exact point of tampering, and exits non-zero.
+
+Two real call sites feed it, both already built:
+
+- `token_family_revoked` -- from `_revoke_family` (Day 17), whenever
+  refresh-token reuse or an unknown token triggers theft detection.
+- `attack_blocked` -- from `AdaptiveResponseMiddleware._enforce` (Day 15-16),
+  whenever the attack tier actually bans an IP (not in shadow mode).
+
+The Django admin registers `AuditLog` read-only with delete disabled --
+deleting a row through the admin would be exactly the tampering this log
+exists to catch, so the only way to "remove" one is to leave evidence that
+`verify_audit_log` will find.

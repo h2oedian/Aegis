@@ -5,6 +5,7 @@ import threading
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,10 +20,11 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
+from .audit import GENESIS_HASH, compute_hash, record_event, verify_chain
 from .authentication import FamilyAwareJWTAuthentication
 from .fingerprint import compute_fingerprint
 from .geoip import haversine_km, locate_ip
-from .models import RefreshTokenRecord, RequestLog
+from .models import AuditLog, RefreshTokenRecord, RequestLog
 from .rate_limiter import TokenBucketRateLimiter, bucket_params_for_score
 from .redis_client import get_redis_client
 from .tasks import consume_request_stream
@@ -739,3 +741,100 @@ class TokenFingerprintBindingTests(TestCase):
         new_record = RefreshTokenRecord.objects.get(jti=new_jti)
         self.assertEqual(new_record.fingerprint, "device-xyz")
         self.assertEqual(AccessToken(rotated.access).payload.get("fingerprint"), "device-xyz")
+
+
+class AuditLogChainTests(TestCase):
+    def test_the_first_record_chains_off_the_genesis_hash(self):
+        record = record_event("test_event", {"a": 1})
+        self.assertEqual(record.previous_hash, GENESIS_HASH)
+        self.assertEqual(
+            record.hash,
+            compute_hash("test_event", {"a": 1}, record.created_at, GENESIS_HASH),
+        )
+
+    def test_each_record_chains_off_the_previous_one(self):
+        first = record_event("first_event")
+        second = record_event("second_event")
+        self.assertEqual(second.previous_hash, first.hash)
+        self.assertNotEqual(second.hash, first.hash)
+
+    def test_a_clean_chain_verifies(self):
+        for i in range(5):
+            record_event("event", {"i": i})
+
+        result = verify_chain()
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.checked, 5)
+        self.assertIsNone(result.broken_at_id)
+
+    def test_an_empty_chain_is_trivially_valid(self):
+        result = verify_chain()
+        self.assertTrue(result.valid)
+        self.assertEqual(result.checked, 0)
+
+    def test_altering_a_record_in_place_is_detected_at_that_record(self):
+        record_event("first_event")
+        tampered = record_event("second_event", {"amount": 10})
+        record_event("third_event")
+
+        AuditLog.objects.filter(pk=tampered.pk).update(payload={"amount": 999})
+
+        result = verify_chain()
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.broken_at_id, tampered.id)
+        self.assertIn("recomputed", result.reason)
+
+    def test_deleting_a_record_breaks_the_link_at_the_next_one(self):
+        first = record_event("first_event")
+        second = record_event("second_event")
+        record_event("third_event")
+
+        second.delete()
+
+        result = verify_chain()
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.checked, 1)  # only "first_event" verified cleanly
+        self.assertNotEqual(result.broken_at_id, first.id)
+
+    def test_verify_audit_log_command_reports_success(self):
+        record_event("first_event")
+        record_event("second_event")
+
+        out = StringIO()
+        call_command("verify_audit_log", stdout=out)
+
+        self.assertIn("Chain intact", out.getvalue())
+        self.assertIn("2", out.getvalue())
+
+    def test_verify_audit_log_command_exits_nonzero_on_tampering(self):
+        record_event("first_event")
+        tampered = record_event("second_event", {"amount": 10})
+        AuditLog.objects.filter(pk=tampered.pk).update(payload={"amount": 999})
+
+        out = StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            call_command("verify_audit_log", stdout=out)
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(f"id={tampered.id}", out.getvalue())
+
+
+class TokenTheftAuditTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="audited-user", password="safe-test-password"
+        )
+
+    def test_theft_detection_records_an_audit_event(self):
+        pair = issue_initial_pair(self.user)
+        rotate_refresh_token(pair.refresh)
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(pair.refresh)
+
+        event = AuditLog.objects.get(event_type="token_family_revoked")
+        family_id = RefreshToken(pair.refresh).payload["family_id"]
+        self.assertEqual(event.payload["family_id"], family_id)

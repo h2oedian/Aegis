@@ -65,3 +65,24 @@ class RefreshTokenRecord(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.family_id}:{self.jti[:8]}"
+
+
+class AuditLog(models.Model):
+    """A tamper-evident record of security-significant events (token theft,
+    an attack blocked, ...). Each row embeds the previous row's ``hash`` in
+    its own ``previous_hash`` before hashing itself, so altering or deleting
+    any past row breaks every hash after it -- verify_audit_log detects
+    exactly where. Rows are written by aegis_core.audit.record_event, never
+    edited afterwards."""
+
+    event_type = models.CharField(max_length=100, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    previous_hash = models.CharField(max_length=64)
+    hash = models.CharField(max_length=64, unique=True, db_index=True)
+
+    class Meta:
+        ordering = ("id",)
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.event_type}"
