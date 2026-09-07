@@ -271,3 +271,37 @@ refresh-token infrastructure from Day 17.
 
 The middleware sits *after* `RequestTelemetryMiddleware` in `MIDDLEWARE`, so
 even a blocked request is still logged with its real status code (403/429).
+
+## Refresh token rotation and theft detection
+
+`POST /api/auth/login/` (username/password) and `POST /api/auth/refresh/`
+issue JWT pairs via `djangorestframework-simplejwt`, but rotation and reuse
+detection are hand-built (`aegis_core/tokens.py`), not SimpleJWT's own
+blacklist app -- that tracks individual used tokens but has no concept of a
+*family*.
+
+Every refresh token is single-use, tracked in `RefreshTokenRecord`
+(`jti`, `family_id`, `used_at`, `revoked_at`). Redeeming one:
+1. issues a new refresh + access pair sharing the same `family_id`, and
+2. marks the old one `used_at`.
+
+Presenting an already-used refresh token -- the signature of a stolen token
+being replayed -- revokes every outstanding token in that family at once,
+`used` or not, denies its `jti`, and returns `401 token_reuse_detected`.
+`family_id` is copied onto the access token too (SimpleJWT copies custom
+refresh claims onto `refresh.access_token` automatically), so
+`FamilyAwareJWTAuthentication` (`aegis_core/authentication.py`) can reject an
+already-issued access token from a revoked family immediately, rather than
+waiting out its short natural expiry.
+
+Denial is checked in two places, matching the fast-Redis/durable-database
+split used everywhere else in this project: `RefreshTokenRecord` is
+authoritative, Redis (`aegis:denylist:jti:*`, `aegis:denylist:family:*`) is a
+cache in front of it that `is_family_revoked` falls back off of -- rather
+than failing open -- when unavailable, since this check is a security
+boundary, not just an availability nicety.
+
+`RequestTelemetryMiddleware`'s existing `token_jti` field (Day 2) needed no
+changes: DRF's `Request.auth` setter writes through to the underlying
+`HttpRequest`, so the access token's claims are already visible to
+telemetry, which runs after the view in the middleware chain.

@@ -15,11 +15,17 @@ from django.test import TestCase, override_settings
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.test import APIRequestFactory
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from .models import RequestLog
+from .authentication import FamilyAwareJWTAuthentication
+from .models import RefreshTokenRecord, RequestLog
 from .rate_limiter import TokenBucketRateLimiter, bucket_params_for_score
 from .redis_client import get_redis_client
 from .tasks import consume_request_stream
+from .token_denylist import deny_family, deny_jti, is_family_revoked, is_jti_denied
+from .tokens import TokenTheftDetected, issue_initial_pair, rotate_refresh_token
 
 
 class RequestTelemetryMiddlewareTests(TestCase):
@@ -377,3 +383,261 @@ class TokenBucketRateLimiterLiveTests(TestCase):
             thread.join()
 
         self.assertEqual(sum(allowed_flags), 5)
+
+
+class TokenRotationTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="token-user", password="safe-test-password"
+        )
+
+    def test_issuing_the_initial_pair_creates_a_refresh_token_record(self):
+        pair = issue_initial_pair(self.user)
+
+        jti = str(RefreshToken(pair.refresh)["jti"])
+        record = RefreshTokenRecord.objects.get(jti=jti)
+        self.assertEqual(record.user, self.user)
+        self.assertIsNone(record.used_at)
+        self.assertIsNone(record.revoked_at)
+
+    def test_rotating_marks_the_old_token_used_and_issues_a_new_one(self):
+        initial = issue_initial_pair(self.user)
+        old_jti = str(RefreshToken(initial.refresh)["jti"])
+
+        rotated = rotate_refresh_token(initial.refresh)
+
+        old_record = RefreshTokenRecord.objects.get(jti=old_jti)
+        self.assertIsNotNone(old_record.used_at)
+        new_jti = str(RefreshToken(rotated.refresh)["jti"])
+        self.assertNotEqual(new_jti, old_jti)
+        self.assertTrue(RefreshTokenRecord.objects.filter(jti=new_jti).exists())
+
+    def test_rotated_tokens_share_the_same_family(self):
+        initial = issue_initial_pair(self.user)
+        old_family = RefreshToken(initial.refresh).payload["family_id"]
+
+        rotated = rotate_refresh_token(initial.refresh)
+
+        new_family = RefreshToken(rotated.refresh).payload["family_id"]
+        self.assertEqual(new_family, old_family)
+
+    def test_reusing_a_refresh_token_is_detected_as_theft(self):
+        initial = issue_initial_pair(self.user)
+        rotate_refresh_token(initial.refresh)  # legitimate rotation
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(initial.refresh)  # someone replays the old one
+
+    def test_theft_revokes_every_outstanding_token_in_the_family(self):
+        first_login = issue_initial_pair(self.user)
+        family_id = RefreshToken(first_login.refresh).payload["family_id"]
+        # A second, still-unused token in the same family (e.g. another device).
+        RefreshToken.for_user(self.user)
+        RefreshTokenRecord.objects.create(
+            jti="second-device-jti",
+            family_id=family_id,
+            user=self.user,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        rotate_refresh_token(first_login.refresh)
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(first_login.refresh)  # trigger theft detection
+
+        second_device_record = RefreshTokenRecord.objects.get(jti="second-device-jti")
+        self.assertIsNotNone(second_device_record.revoked_at)
+
+    def test_a_revoked_family_rejects_a_token_that_was_never_reused(self):
+        first_login = issue_initial_pair(self.user)
+        rotated = rotate_refresh_token(first_login.refresh)
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(first_login.refresh)  # detect theft, revoke the family
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(rotated.refresh)  # never reused, but its family is dead
+
+    def test_an_unknown_but_validly_signed_token_is_treated_as_theft(self):
+        forged = RefreshToken.for_user(self.user)
+        forged["family_id"] = "not-in-the-database"
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(str(forged))
+
+    def test_a_token_missing_the_family_claim_is_rejected(self):
+        bare = RefreshToken.for_user(self.user)
+
+        with self.assertRaises(TokenTheftDetected):
+            rotate_refresh_token(str(bare))
+
+
+class _FakeRedis:
+    """Minimal in-memory stand-in for the get/set/exists the denylist uses,
+    for tests that need real cross-call round-trip behaviour without a
+    live Redis server."""
+
+    def __init__(self):
+        self._store = {}
+
+    def set(self, key, value, ex=None):
+        self._store[key] = value
+        return True
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def exists(self, key):
+        return 1 if key in self._store else 0
+
+
+def _use_fake_denylist_redis(test_case):
+    fake = _FakeRedis()
+    patcher = patch("aegis_core.token_denylist.get_redis_client", return_value=fake)
+    test_case.addCleanup(patcher.stop)
+    patcher.start()
+    return fake
+
+
+class TokenDenylistTests(TestCase):
+    def test_deny_and_check_jti_round_trip(self):
+        _use_fake_denylist_redis(self)
+        deny_jti("some-jti")
+        self.assertTrue(is_jti_denied("some-jti"))
+        self.assertFalse(is_jti_denied("a-different-jti"))
+
+    def test_deny_and_check_family_round_trip(self):
+        _use_fake_denylist_redis(self)
+        deny_family("some-family")
+        self.assertTrue(is_family_revoked("some-family"))
+        self.assertFalse(is_family_revoked("a-different-family"))
+
+    def test_is_jti_denied_fails_open_when_redis_is_unavailable(self):
+        with patch("aegis_core.token_denylist.get_redis_client") as get_client:
+            get_client.return_value.exists.side_effect = RedisConnectionError("offline")
+            self.assertFalse(is_jti_denied("whatever"))
+
+    def test_is_family_revoked_falls_back_to_the_database_when_redis_is_unavailable(self):
+        user = get_user_model().objects.create_user(username="denylist-user")
+        RefreshTokenRecord.objects.create(
+            jti="db-only-jti",
+            family_id="db-only-family",
+            user=user,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            revoked_at=datetime.now(timezone.utc),
+        )
+
+        with patch("aegis_core.token_denylist.get_redis_client") as get_client:
+            get_client.return_value.exists.side_effect = RedisConnectionError("offline")
+            self.assertTrue(is_family_revoked("db-only-family"))
+            self.assertFalse(is_family_revoked("some-other-family"))
+
+
+class FamilyAwareJWTAuthenticationTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="auth-user", password="safe-test-password"
+        )
+        self.auth = FamilyAwareJWTAuthentication()
+        self.factory = APIRequestFactory()
+        _use_fake_denylist_redis(self)
+
+    def _request_with_token(self, access_token):
+        return self.factory.get("/api/health/", HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+    def test_accepts_a_normal_access_token(self):
+        pair = issue_initial_pair(self.user)
+        request = self._request_with_token(pair.access)
+
+        user, token = self.auth.authenticate(request)
+
+        self.assertEqual(user, self.user)
+        self.assertEqual(str(token["jti"]), str(AccessToken(pair.access)["jti"]))
+
+    def test_rejects_an_access_token_whose_family_was_revoked(self):
+        pair = issue_initial_pair(self.user)
+        family_id = RefreshToken(pair.refresh).payload["family_id"]
+        deny_family(family_id)
+
+        request = self._request_with_token(pair.access)
+        with self.assertRaises(AuthenticationFailed):
+            self.auth.authenticate(request)
+
+    def test_rejects_a_directly_denied_access_token(self):
+        pair = issue_initial_pair(self.user)
+        access_jti = str(AccessToken(pair.access)["jti"])
+        deny_jti(access_jti)
+
+        request = self._request_with_token(pair.access)
+        with self.assertRaises(AuthenticationFailed):
+            self.auth.authenticate(request)
+
+
+class AuthEndpointTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="endpoint-user", password="correct-horse-battery-staple"
+        )
+
+    def test_login_returns_a_token_pair_for_valid_credentials(self):
+        response = self.client.post(
+            "/api/auth/login/",
+            {"username": "endpoint-user", "password": "correct-horse-battery-staple"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("refresh", response.json())
+        self.assertIn("access", response.json())
+
+    def test_login_rejects_invalid_credentials(self):
+        response = self.client.post(
+            "/api/auth/login/", {"username": "endpoint-user", "password": "wrong"}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_refresh_rotates_and_returns_a_new_pair(self):
+        pair = issue_initial_pair(self.user)
+
+        response = self.client.post("/api/auth/refresh/", {"refresh": pair.refresh})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()["refresh"], pair.refresh)
+
+    def test_refresh_rejects_a_reused_token(self):
+        pair = issue_initial_pair(self.user)
+        self.client.post("/api/auth/refresh/", {"refresh": pair.refresh})
+
+        response = self.client.post("/api/auth/refresh/", {"refresh": pair.refresh})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "token_reuse_detected")
+
+    def test_refresh_requires_a_refresh_field(self):
+        response = self.client.post("/api/auth/refresh/", {})
+        self.assertEqual(response.status_code, 400)
+
+    def test_health_endpoint_records_the_access_token_jti_in_telemetry(self):
+        pair = issue_initial_pair(self.user)
+        access_jti = str(AccessToken(pair.access)["jti"])
+
+        redis_patcher = patch("aegis_core.middleware.get_redis_client")
+        self.addCleanup(redis_patcher.stop)
+        redis_client = redis_patcher.start().return_value
+
+        response = self.client.get(
+            "/api/health/", HTTP_AUTHORIZATION=f"Bearer {pair.access}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        published_fields = redis_client.xadd.call_args.args[1]
+        self.assertEqual(published_fields["token_jti"], access_jti)
+        self.assertEqual(published_fields["user_id"], str(self.user.pk))
+
+    def test_health_endpoint_rejects_an_access_token_from_a_revoked_family(self):
+        _use_fake_denylist_redis(self)
+        pair = issue_initial_pair(self.user)
+        family_id = RefreshToken(pair.refresh).payload["family_id"]
+        deny_family(family_id)
+
+        response = self.client.get(
+            "/api/health/", HTTP_AUTHORIZATION=f"Bearer {pair.access}"
+        )
+
+        self.assertEqual(response.status_code, 401)

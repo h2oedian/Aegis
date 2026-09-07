@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import RequestLog
+from .models import RefreshTokenRecord, RequestLog
 
 
 @admin.register(RequestLog)
@@ -27,6 +27,28 @@ class RequestLogAdmin(admin.ModelAdmin):
         "user",
         "token_jti",
         "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(RefreshTokenRecord)
+class RefreshTokenRecordAdmin(admin.ModelAdmin):
+    list_display = ("issued_at", "user", "family_id", "jti", "used_at", "revoked_at")
+    list_filter = ("revoked_at", "issued_at")
+    search_fields = ("family_id", "jti", "user__username")
+    readonly_fields = (
+        "jti",
+        "family_id",
+        "user",
+        "issued_at",
+        "expires_at",
+        "used_at",
+        "revoked_at",
     )
 
     def has_add_permission(self, request):
