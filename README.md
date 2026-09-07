@@ -81,3 +81,38 @@ Each output row carries the real request telemetry (path, method, status,
 duration, IP, user agent, user id, jti) plus a `normal`/`attack` label and the
 scenario name. This labeled CSV is the base dataset the detection engine
 (Phase 3) will be trained and evaluated against.
+
+## Rule-based detection engine
+
+`aegis_rules.engine.RuleEngine` scores a request from 0-100 by combining four
+rules, each graded rather than pass/fail:
+
+- `injection_signature` — regex signatures for SQLi, XSS, and path traversal,
+  checked inline against the current request's path and query params
+- `unauthorized_attempts` — count of 401s from the same IP in a trailing
+  window (default 5 minutes)
+- `not_found_rate` — share of that IP's recent requests returning 404
+  (endpoint scraping/enumeration)
+- `sequential_id_scan` — longest run of consecutive resource IDs the IP has
+  walked (e.g. `/api/orders/7/`, `/8/`, `/9/`)
+
+The windowed rules query `RequestLog` directly — the `(ip_address,
+created_at)` and `(status_code, created_at)` indexes added alongside the
+telemetry model exist for exactly this. Scores are summed and capped at 100,
+so multiple weak signals on one request outrank a single one:
+
+```python
+from aegis_rules.engine import RuleEngine
+
+result = RuleEngine().evaluate(
+    ip_address=request.META.get("REMOTE_ADDR"),
+    path=request.path,
+    query_params=request.GET,
+)
+result.score            # 0-100
+result.triggered_rules  # which rules fired, and why
+```
+
+This engine isn't wired into the request/response cycle yet — that lands with
+the adaptive response layer in Phase 4. For now it's a tested, standalone
+scorer that Phase 3's model-based risk score will later be blended with.
