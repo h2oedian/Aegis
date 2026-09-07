@@ -4,14 +4,18 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import joblib
 import numpy as np
 from django.core.management import call_command
-from django.test import TestCase
+from django.http import HttpResponse
+from django.test import RequestFactory, TestCase, override_settings
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegis_core.models import RequestLog
 from aegis_core.paths import normalize_path
+from aegis_core.rate_limiter import RateLimitDecision
 
 from .calibration import (
     EvaluationSample,
@@ -21,7 +25,17 @@ from .calibration import (
     select_threshold_for_target_fpr,
     sweep_thresholds,
 )
+from .decision import (
+    TIER_ATTACK,
+    TIER_NORMAL,
+    TIER_RISKY,
+    TIER_SUSPICIOUS,
+    Decision,
+    DecisionEngine,
+    classify_score,
+)
 from .features import extract_features, extract_window_features
+from .middleware import AdaptiveResponseMiddleware
 from .model import FEATURE_NAMES, AnomalyModel, ScoreCalibration
 from .risk import combined_risk_score
 from .training import (
@@ -612,6 +626,169 @@ class CalibrateThresholdsCommandTests(TestCase):
         self.assertEqual(report["chosen_threshold"], 6.0)
         self.assertEqual(report["recall"], 1.0)
         self.assertEqual(report["false_positive_rate"], 0.0)
+
+
+class ClassifyScoreTests(unittest.TestCase):
+    def test_matches_the_roadmap_response_table(self):
+        self.assertEqual(classify_score(0), TIER_NORMAL)
+        self.assertEqual(classify_score(29.9), TIER_NORMAL)
+        self.assertEqual(classify_score(30), TIER_SUSPICIOUS)
+        self.assertEqual(classify_score(59.9), TIER_SUSPICIOUS)
+        self.assertEqual(classify_score(60), TIER_RISKY)
+        self.assertEqual(classify_score(79.9), TIER_RISKY)
+        self.assertEqual(classify_score(80), TIER_ATTACK)
+        self.assertEqual(classify_score(100), TIER_ATTACK)
+
+
+class DecisionJsonRoundTripTests(unittest.TestCase):
+    def test_round_trips_through_json(self):
+        decision = Decision(score=42.5, tier=TIER_SUSPICIOUS, rule_score=20.0, model_score=25.0)
+        self.assertEqual(Decision.from_json(decision.to_json()), decision)
+
+
+class DecisionEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.redis_client = MagicMock()
+        self.redis_client.get.return_value = None
+        self.engine = DecisionEngine(redis_client=self.redis_client, rule_weight=1.0)
+
+    def test_computes_and_caches_a_fresh_decision(self):
+        decision = self.engine.decide(
+            ip_address="203.0.113.80", path="/api/health/", query_params={}
+        )
+
+        self.assertEqual(decision.tier, TIER_NORMAL)
+        self.assertEqual(decision.score, 0.0)
+        self.redis_client.set.assert_called_once()
+        cache_key = self.redis_client.set.call_args.args[0]
+        self.assertEqual(cache_key, "aegis:decision:203.0.113.80")
+
+    def test_returns_the_cached_decision_without_recomputing(self):
+        cached = Decision(score=90.0, tier=TIER_ATTACK, rule_score=90.0, model_score=0.0)
+        self.redis_client.get.return_value = cached.to_json()
+
+        with patch("aegis_ml.decision.RuleEngine.evaluate") as evaluate:
+            decision = self.engine.decide(
+                ip_address="203.0.113.81", path="/api/health/", query_params={}
+            )
+
+        evaluate.assert_not_called()
+        self.assertEqual(decision, cached)
+
+    def test_skips_the_cache_entirely_without_an_ip(self):
+        self.engine.decide(ip_address=None, path="/api/health/", query_params={})
+        self.redis_client.get.assert_not_called()
+        self.redis_client.set.assert_not_called()
+
+    def test_falls_back_to_a_fresh_decision_when_the_cache_is_unavailable(self):
+        self.redis_client.get.side_effect = RedisConnectionError("offline")
+        self.redis_client.set.side_effect = RedisConnectionError("offline")
+
+        decision = self.engine.decide(
+            ip_address="203.0.113.82", path="/api/health/", query_params={}
+        )
+
+        self.assertEqual(decision.tier, TIER_NORMAL)
+
+    def test_ban_sets_a_key_with_the_configured_ttl(self):
+        with override_settings(AEGIS_BAN_DURATION_SECONDS=120):
+            self.engine.ban("203.0.113.83")
+
+        self.redis_client.set.assert_called_once_with("aegis:ban:203.0.113.83", "1", ex=120)
+
+    def test_is_banned_reflects_key_existence(self):
+        self.redis_client.exists.return_value = 1
+        self.assertTrue(self.engine.is_banned("203.0.113.84"))
+
+        self.redis_client.exists.return_value = 0
+        self.assertFalse(self.engine.is_banned("203.0.113.84"))
+
+    def test_is_banned_fails_safe_when_redis_is_unavailable(self):
+        self.redis_client.exists.side_effect = RedisConnectionError("offline")
+        self.assertFalse(self.engine.is_banned("203.0.113.85"))
+
+
+@override_settings(AEGIS_SHADOW_MODE=True)
+class AdaptiveResponseMiddlewareShadowModeTests(TestCase):
+    def test_attack_tier_decision_does_not_block_the_request(self):
+        attack_decision = Decision(score=95.0, tier=TIER_ATTACK, rule_score=95.0, model_score=0.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=attack_decision):
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 200)
+
+class AdaptiveResponseMiddlewareUnitTests(TestCase):
+    def test_attaches_the_decision_to_the_request(self):
+        decision = Decision(score=10.0, tier=TIER_NORMAL, rule_score=10.0, model_score=0.0)
+        captured = {}
+
+        def probe(request):
+            captured["decision"] = request.aegis_decision
+            return HttpResponse("ok")
+
+        request = RequestFactory().get("/api/health/")
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=decision):
+            AdaptiveResponseMiddleware(probe)(request)
+
+        self.assertEqual(captured["decision"], decision)
+
+
+@override_settings(AEGIS_SHADOW_MODE=False)
+class AdaptiveResponseMiddlewareEnforcingTests(TestCase):
+    def test_attack_tier_blocks_and_records_a_ban(self):
+        attack_decision = Decision(score=95.0, tier=TIER_ATTACK, rule_score=95.0, model_score=0.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=attack_decision), patch(
+            "aegis_ml.middleware.DecisionEngine.is_banned", return_value=False
+        ), patch("aegis_ml.middleware.DecisionEngine.ban") as ban:
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "temporarily_blocked")
+        ban.assert_called_once()
+
+    def test_already_banned_ip_is_rejected_without_recomputing_a_decision(self):
+        with patch("aegis_ml.middleware.DecisionEngine.is_banned", return_value=True), patch(
+            "aegis_ml.middleware.DecisionEngine.decide"
+        ) as decide:
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 403)
+        decide.assert_not_called()
+
+    def test_risky_tier_returns_a_challenge_response(self):
+        risky_decision = Decision(score=70.0, tier=TIER_RISKY, rule_score=70.0, model_score=0.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=risky_decision), patch(
+            "aegis_ml.middleware.DecisionEngine.is_banned", return_value=False
+        ):
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "challenge_required")
+
+    def test_normal_tier_is_still_subject_to_rate_limiting(self):
+        normal_decision = Decision(score=5.0, tier=TIER_NORMAL, rule_score=5.0, model_score=0.0)
+        denied = RateLimitDecision(allowed=False, remaining_tokens=0.0, capacity=10.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=normal_decision), patch(
+            "aegis_ml.middleware.DecisionEngine.is_banned", return_value=False
+        ), patch(
+            "aegis_ml.middleware.TokenBucketRateLimiter.check_for_risk_score", return_value=denied
+        ):
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["error"], "rate_limited")
+
+    def test_normal_tier_within_rate_limit_passes_through(self):
+        normal_decision = Decision(score=5.0, tier=TIER_NORMAL, rule_score=5.0, model_score=0.0)
+        allowed = RateLimitDecision(allowed=True, remaining_tokens=9.0, capacity=10.0)
+        with patch("aegis_ml.middleware.DecisionEngine.decide", return_value=normal_decision), patch(
+            "aegis_ml.middleware.DecisionEngine.is_banned", return_value=False
+        ), patch(
+            "aegis_ml.middleware.TokenBucketRateLimiter.check_for_risk_score", return_value=allowed
+        ):
+            response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

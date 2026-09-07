@@ -235,3 +235,39 @@ request -- the signature rule had nothing to match against on replay. Fixed
 by adding `RequestLog.query_string` (migration `0004`) and publishing it from
 the middleware; `label_request_dataset` now exports it too, and calibration
 decodes it back into query params before handing it to the rule engine.
+
+## Adaptive response layer
+
+This is where the rule engine, anomaly model, and rate limiter -- built and
+tested independently through Phase 3 -- actually connect to live request
+handling, via `aegis_ml.middleware.AdaptiveResponseMiddleware`.
+
+Per request it computes a `Decision` (`aegis_ml/decision.py`): the rule
+engine's score plus the anomaly model's score (loaded once from
+`AEGIS_ANOMALY_MODEL_PATH`, falling back to rules-only scoring if no model
+has been trained yet), blended by `AEGIS_RULE_WEIGHT`, then classified into
+the roadmap's four tiers:
+
+| Score | Tier | Response |
+|---|---|---|
+| 0-30 | normal | pass through; still subject to the token-bucket rate limit |
+| 30-60 | suspicious | same, but the bucket has already shrunk (Day 9's continuous scaling) |
+| 60-80 | risky | `403 challenge_required` (a hook for real CAPTCHA/2FA -- not built) |
+| 80-100 | attack | `403 temporarily_blocked`, IP banned for `AEGIS_BAN_DURATION_SECONDS` |
+
+Rule evaluation hits Postgres and model scoring runs a scikit-learn
+estimator, both too slow to redo on every request from the same client, so
+the decision is cached in Redis for `AEGIS_DECISION_CACHE_TTL_SECONDS`
+(default 5s) and reused until it expires. A confirmed attack verdict is
+remembered separately and much longer (`AEGIS_BAN_DURATION_SECONDS`, default
+300s) as a ban flag, so a banned IP is rejected on a plain Redis key check --
+no rule/model recomputation at all.
+
+**Shadow mode** (`AEGIS_SHADOW_MODE`, default `true`) computes and logs every
+decision but never blocks a request -- the safe way to watch this layer
+against real traffic before trusting it to affect responses. Token
+revocation for the attack tier is a placeholder for now; it needs the
+refresh-token infrastructure from Day 17.
+
+The middleware sits *after* `RequestTelemetryMiddleware` in `MIDDLEWARE`, so
+even a blocked request is still logged with its real status code (403/429).

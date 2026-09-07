@@ -5,6 +5,7 @@ from django.conf import settings
 from redis.exceptions import RedisError
 
 from .redis_client import get_redis_client
+from .request_meta import client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class RequestTelemetryMiddleware:
                     "method": request.method[:10],
                     "status_code": str(status_code),
                     "duration_ms": f"{duration_ms:.6f}",
-                    "ip_address": self._client_ip(request) or "",
+                    "ip_address": client_ip(request) or "",
                     "user_agent": request.META.get("HTTP_USER_AGENT", "")[:1024],
                     "user_id": user_id,
                     "token_jti": self._token_jti(request),
@@ -54,14 +55,6 @@ class RequestTelemetryMiddleware:
             # Security telemetry is fail-open: an unavailable Redis must not
             # make the protected API unavailable.
             logger.warning("Could not publish request telemetry: %s", exc)
-
-    @staticmethod
-    def _client_ip(request):
-        if settings.AEGIS_TRUST_PROXY_HEADERS:
-            forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
-            if forwarded_for:
-                return forwarded_for.split(",", maxsplit=1)[0].strip() or None
-        return request.META.get("REMOTE_ADDR") or None
 
     @staticmethod
     def _token_jti(request):

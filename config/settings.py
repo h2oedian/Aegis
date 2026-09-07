@@ -32,6 +32,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "aegis_core.middleware.RequestTelemetryMiddleware",
+    "aegis_ml.middleware.AdaptiveResponseMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -115,3 +116,14 @@ AEGIS_RATE_LIMIT_MIN_CAPACITY = float(os.getenv("AEGIS_RATE_LIMIT_MIN_CAPACITY",
 AEGIS_RATE_LIMIT_MIN_REFILL_PER_SECOND = float(
     os.getenv("AEGIS_RATE_LIMIT_MIN_REFILL_PER_SECOND", "0.05")
 )
+
+# Adaptive response layer (Phase 4). Shadow mode computes and logs a
+# decision for every request but never blocks -- flip it off only once
+# shadow-mode logs look right against real traffic.
+AEGIS_SHADOW_MODE = os.getenv("AEGIS_SHADOW_MODE", "true").lower() == "true"
+AEGIS_RULE_WEIGHT = float(os.getenv("AEGIS_RULE_WEIGHT", "0.5"))
+AEGIS_ANOMALY_MODEL_PATH = os.getenv(
+    "AEGIS_ANOMALY_MODEL_PATH", str(BASE_DIR / "models" / "isolation_forest.joblib")
+)
+AEGIS_DECISION_CACHE_TTL_SECONDS = float(os.getenv("AEGIS_DECISION_CACHE_TTL_SECONDS", "5"))
+AEGIS_BAN_DURATION_SECONDS = int(os.getenv("AEGIS_BAN_DURATION_SECONDS", "300"))
