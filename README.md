@@ -52,3 +52,32 @@ cd aegis-sim
 pip install -e .
 aegis-sim brute-force --base-url http://127.0.0.1:8000 --rate 5 --duration 10
 ```
+
+There is also a `normal-traffic` scenario: irregular GETs across health, product
+listing, and order endpoints, meant to look like an ordinary user rather than
+an attack. Its pacing can be randomized with `--jitter` (0-1) instead of
+holding the fixed `--rate` cadence the attack scenarios use.
+
+## Labeled dataset generation
+
+`aegis-sim-dataset` (also in `aegis-sim/`) runs a full campaign against a
+target: mostly `normal-traffic`, interrupted by short bursts of each attack
+scenario, and writes a manifest of every window's start/end time and label.
+
+```bash
+aegis-sim-dataset --base-url http://127.0.0.1:8000 --hours 2 \
+  --normal-share 0.85 --attack-burst-seconds 60 --output dataset_manifest.json
+```
+
+Once the campaign has run (and the Celery consumer has drained the request
+stream into Postgres), label the `RequestLog` rows it produced and export them
+to CSV with a Django management command:
+
+```bash
+python manage.py label_request_dataset --manifest dataset_manifest.json --output dataset.csv
+```
+
+Each output row carries the real request telemetry (path, method, status,
+duration, IP, user agent, user id, jti) plus a `normal`/`attack` label and the
+scenario name. This labeled CSV is the base dataset the detection engine
+(Phase 3) will be trained and evaluated against.

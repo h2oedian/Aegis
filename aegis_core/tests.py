@@ -1,6 +1,12 @@
+import csv
+import json
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -160,3 +166,88 @@ class RequestStreamConsumerTests(TestCase):
             RequestLog.objects.filter(stream_id="1757145600000-2").exists()
         )
         redis_client.xreadgroup.assert_not_called()
+
+
+class LabelRequestDatasetCommandTests(TestCase):
+    def setUp(self):
+        self.window_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def make_log(self, stream_id, created_at, path="/api/health/"):
+        return RequestLog.objects.create(
+            stream_id=stream_id,
+            path=path,
+            method="GET",
+            status_code=200,
+            duration_ms=1.5,
+            created_at=created_at,
+        )
+
+    def write_manifest(self, windows):
+        manifest_path = Path(tempfile.mkdtemp()) / "manifest.json"
+        manifest_path.write_text(json.dumps(windows), encoding="utf-8")
+        return manifest_path
+
+    def test_labels_rows_by_campaign_window(self):
+        self.make_log(
+            "normal-1", self.window_start + timedelta(seconds=5), path="/api/products/"
+        )
+        self.make_log(
+            "attack-1", self.window_start + timedelta(seconds=65), path="/api/orders/1/"
+        )
+        manifest = self.write_manifest(
+            [
+                {
+                    "label": "normal",
+                    "scenario": "normal-traffic",
+                    "started_at": self.window_start.isoformat(),
+                    "ended_at": (self.window_start + timedelta(seconds=60)).isoformat(),
+                },
+                {
+                    "label": "attack",
+                    "scenario": "id-enumeration",
+                    "started_at": (self.window_start + timedelta(seconds=60)).isoformat(),
+                    "ended_at": (self.window_start + timedelta(seconds=120)).isoformat(),
+                },
+            ]
+        )
+        output_path = manifest.parent / "dataset.csv"
+
+        call_command(
+            "label_request_dataset",
+            manifest=str(manifest),
+            output=str(output_path),
+        )
+
+        with open(output_path, newline="", encoding="utf-8") as csv_file:
+            rows = list(csv.DictReader(csv_file))
+
+        self.assertEqual(len(rows), 2)
+        by_path = {row["path"]: row for row in rows}
+        self.assertEqual(by_path["/api/products/"]["label"], "normal")
+        self.assertEqual(by_path["/api/orders/1/"]["label"], "attack")
+        self.assertEqual(by_path["/api/orders/1/"]["scenario"], "id-enumeration")
+
+    def test_rows_outside_every_window_are_excluded(self):
+        self.make_log("in-window", self.window_start + timedelta(seconds=5))
+        self.make_log("outside-window", self.window_start + timedelta(hours=2))
+        manifest = self.write_manifest(
+            [
+                {
+                    "label": "normal",
+                    "scenario": "normal-traffic",
+                    "started_at": self.window_start.isoformat(),
+                    "ended_at": (self.window_start + timedelta(seconds=60)).isoformat(),
+                }
+            ]
+        )
+        output_path = manifest.parent / "dataset.csv"
+
+        call_command(
+            "label_request_dataset",
+            manifest=str(manifest),
+            output=str(output_path),
+        )
+
+        with open(output_path, newline="", encoding="utf-8") as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        self.assertEqual(len(rows), 1)

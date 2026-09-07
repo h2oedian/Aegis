@@ -9,3 +9,6 @@ htmlcov/
 celerybeat-schedule*
 .idea/
 .vscode/
+*.egg-info/
+build/
+dist/

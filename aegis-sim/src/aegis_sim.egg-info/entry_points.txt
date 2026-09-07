@@ -1,3 +1,0 @@
-[console_scripts]
-aegis-sim = aegis_sim.cli:main
-aegis-sim-dataset = aegis_sim.dataset_cli:main
