@@ -26,14 +26,25 @@ INSTALLED_APPS = [
     "dashboard",
 ]
 
+# Lets the load-test harness (loadtest/measure_overhead.py) run the exact
+# same app with Aegis's own middleware compiled out, to isolate its
+# per-request overhead from Django/DRF's own baseline latency.
+AEGIS_ENABLED = os.getenv("AEGIS_ENABLED", "true").lower() == "true"
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "aegis_core.middleware.RequestTelemetryMiddleware",
-    "aegis_ml.middleware.AdaptiveResponseMiddleware",
+    *(
+        [
+            "aegis_core.middleware.RequestTelemetryMiddleware",
+            "aegis_ml.middleware.AdaptiveResponseMiddleware",
+        ]
+        if AEGIS_ENABLED
+        else []
+    ),
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
