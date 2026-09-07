@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-sim"
+version = "0.1.0"
+description = "Authorized traffic and attack-scenario simulator for Aegis"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.28,<1.0"]
+
+[project.scripts]
+aegis-sim = "aegis_sim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
