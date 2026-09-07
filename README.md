@@ -395,3 +395,51 @@ exist before, since nothing needed to *reverse* a ban) and record a
 `manual_ban`/`manual_unban` event to the same audit log the automatic
 `attack_blocked` path writes to -- a human overriding the system is exactly
 the kind of thing that log exists to remember.
+
+## Load testing and overhead
+
+`AEGIS_ENABLED` (env var, default `true`) compiles `RequestTelemetryMiddleware`
+and `AdaptiveResponseMiddleware` out of `MIDDLEWARE` entirely when false --
+same app, same views, Aegis's own per-request cost isolated to on/off.
+`loadtest/measure_overhead.py` uses it to answer the roadmap's Day 21
+question directly: starts the server twice (once per setting), drives each
+with a headless Locust run (`loadtest/locustfile.py`, hitting `/api/health/`
+-- the one endpoint that exists in this repo and passes through the full
+middleware stack; Aegis protects other people's business endpoints, not
+itself), and diffs average response time into an overhead percentage against
+a configurable budget (5% by default, per the roadmap), exiting non-zero if
+it's exceeded.
+
+```bash
+pip install -r loadtest/requirements.txt
+python loadtest/measure_overhead.py --users 50 --duration 30
+```
+
+Needs a real database and Redis reachable via whatever `DJANGO_SETTINGS_MODULE`
+is already configured -- run it against the `docker compose` stack (or
+`docker compose exec web python loadtest/measure_overhead.py`) for numbers
+that mean anything.
+
+**I could not get a trustworthy number in this sandbox** (no Docker here,
+so no real Postgres or Redis) and want to say so plainly rather than publish
+a fabricated pass. Two things I tried both turned out to measure the test
+environment, not Aegis:
+
+- Against an *unreachable* Redis, every request pays the fail-open path's
+  connection-timeout cost on every attempt (no caching benefit ever kicks
+  in) -- measured "overhead" was 900%+, an artifact of nothing being there
+  to answer, not of Aegis's own logic.
+- Substituting `fakeredis`'s TCP server got further (one clean low-concurrency
+  run actually showed the decision cache paying off: aegis-on *faster* on
+  average than off, -16.7%), but at higher concurrency it started returning
+  corrupted RESP protocol responses outright -- a pure-Python Redis
+  substitute isn't a sound stand-in for latency measurement, and I stopped
+  trusting anything it produced, favorable or not.
+
+So: the harness is real and ready to run; the number in this README isn't,
+because I don't have the infrastructure to earn one honestly right now. If
+you run it against the real stack and it comes in over budget, the first
+places I'd look are `DecisionEngine`'s two Redis round trips per cache-miss
+request and the rule engine's per-rule `RequestLog` queries (Day 7-8's
+`(ip_address, created_at)` / `(status_code, created_at)` indexes should keep
+those cheap, but worth confirming against `EXPLAIN ANALYZE` before assuming).
