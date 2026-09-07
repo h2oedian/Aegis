@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: aegis-sim
+Version: 0.1.0
+Summary: Authorized traffic and attack-scenario simulator for Aegis
+Requires-Python: >=3.11
+Requires-Dist: httpx<1.0,>=0.28

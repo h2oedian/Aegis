@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -39,7 +40,13 @@ async def run_simulation(
     rate: float,
     duration: float,
     timeout: float,
+    jitter: float = 0.0,
 ) -> SimulationResult:
+    """Replay ``requests`` against ``base_url`` at roughly ``rate`` req/s.
+
+    ``jitter`` (0 <= jitter < 1) randomizes each pause by that fraction
+    instead of holding a fixed cadence, to mimic irregular human traffic.
+    """
     result = SimulationResult(scenario=scenario_name)
     interval = 1.0 / rate
     deadline = time.monotonic() + duration
@@ -63,7 +70,8 @@ async def run_simulation(
             except httpx.HTTPError:
                 result.errors += 1
 
-            next_request_at += interval
+            step = interval * random.uniform(1 - jitter, 1 + jitter) if jitter else interval
+            next_request_at += step
             delay = next_request_at - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)

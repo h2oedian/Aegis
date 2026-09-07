@@ -7,7 +7,13 @@ from .safety import UnsafeTargetError, validate_target
 from .scenarios import create_scenario
 
 
-SCENARIOS = ("brute-force", "scrape", "id-enumeration", "injection-probes")
+SCENARIOS = (
+    "brute-force",
+    "scrape",
+    "id-enumeration",
+    "injection-probes",
+    "normal-traffic",
+)
 
 
 def positive_float(value: str) -> float:
@@ -31,6 +37,13 @@ def bounded_duration(value: str) -> float:
     return duration
 
 
+def bounded_jitter(value: str) -> float:
+    jitter = float(value)
+    if not 0 <= jitter < 1:
+        raise argparse.ArgumentTypeError("jitter must be in the range [0, 1)")
+    return jitter
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aegis-sim",
@@ -41,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rate", type=bounded_rate, default=5.0)
     parser.add_argument("--duration", type=bounded_duration, default=10.0)
     parser.add_argument("--timeout", type=positive_float, default=5.0)
+    parser.add_argument(
+        "--jitter",
+        type=bounded_jitter,
+        default=0.0,
+        help="Randomize each pause by this fraction of the interval (0-1).",
+    )
     parser.add_argument("--username", default="aegis-test-user")
     parser.add_argument("--password-prefix", default="invalid-password-")
     parser.add_argument("--start-id", type=int, default=1)
@@ -75,6 +94,7 @@ def main() -> None:
             rate=args.rate,
             duration=args.duration,
             timeout=args.timeout,
+            jitter=args.jitter,
         )
     )
     print(json.dumps(result.summary(), indent=2, sort_keys=True))

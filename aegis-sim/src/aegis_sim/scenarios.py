@@ -1,3 +1,4 @@
+import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -60,6 +61,24 @@ def injection_probes() -> Iterator[RequestSpec]:
         index = (index + 1) % len(payloads)
 
 
+def normal_traffic(token: str | None = None) -> Iterator[RequestSpec]:
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    requests = (
+        RequestSpec(method="GET", path="/api/health/"),
+        RequestSpec(method="GET", path="/api/products/"),
+        RequestSpec(method="GET", path="/api/products/", params={"page": "2"}),
+        RequestSpec(method="GET", path="/api/products/", params={"page": "3"}),
+        RequestSpec(method="GET", path="/api/products/", params={"search": "shoes"}),
+        RequestSpec(method="GET", path="/api/orders/", headers=headers),
+    )
+    while True:
+        yield random.choice(requests)
+
+
+ATTACK_SCENARIOS = ("brute-force", "scrape", "id-enumeration", "injection-probes")
+BENIGN_SCENARIOS = ("normal-traffic",)
+
+
 def create_scenario(
     name: str,
     *,
@@ -73,6 +92,7 @@ def create_scenario(
         "scrape": product_scrape,
         "id-enumeration": lambda: id_enumeration(start_id, token),
         "injection-probes": injection_probes,
+        "normal-traffic": lambda: normal_traffic(token),
     }
     return scenarios[name]()
 

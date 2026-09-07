@@ -1,9 +1,11 @@
+import itertools
 import unittest
 
 from aegis_sim.scenarios import (
     brute_force,
     id_enumeration,
     injection_probes,
+    normal_traffic,
     product_scrape,
 )
 
@@ -36,6 +38,20 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(payloads[0], payloads[4])
         self.assertTrue(any("script" in payload for payload in payloads))
         self.assertTrue(any("UNION" in payload for payload in payloads))
+
+    def test_normal_traffic_varies_paths_without_attack_signatures(self):
+        requests = list(itertools.islice(normal_traffic(), 50))
+        distinct_paths = {request.path for request in requests}
+        self.assertGreater(len(distinct_paths), 1)
+        self.assertTrue(all(request.method == "GET" for request in requests))
+
+    def test_normal_traffic_attaches_optional_token(self):
+        requests = itertools.islice(normal_traffic("access-token"), 200)
+        orders_requests = [request for request in requests if request.path == "/api/orders/"]
+        self.assertTrue(orders_requests)
+        self.assertEqual(
+            orders_requests[0].headers, {"Authorization": "Bearer access-token"}
+        )
 
 
 if __name__ == "__main__":
