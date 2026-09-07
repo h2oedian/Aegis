@@ -45,7 +45,14 @@ class RequestTelemetryMiddlewareTests(TestCase):
         self.assertEqual(fields["ip_address"], "203.0.113.10")
         self.assertEqual(fields["user_agent"], "Aegis test client")
         self.assertEqual(fields["user_id"], "")
+        self.assertEqual(fields["query_string"], "")
         self.assertGreaterEqual(float(fields["duration_ms"]), 0)
+
+    def test_publishes_query_string(self):
+        self.client.get("/api/health/?search=%27+OR+%271%27%3D%271&page=2")
+        self.assertEqual(
+            self.published_fields()["query_string"], "search=%27+OR+%271%27%3D%271&page=2"
+        )
 
     def test_publishes_authenticated_session_user_id(self):
         user = get_user_model().objects.create_user(
@@ -99,6 +106,7 @@ class RequestStreamConsumerTests(TestCase):
                         {
                             "occurred_at_ms": "1757145600000",
                             "path": "/api/orders/1/",
+                            "query_string": "search=%27+OR+%271%27%3D%271",
                             "method": "GET",
                             "status_code": "200",
                             "duration_ms": "1.25",
@@ -115,6 +123,7 @@ class RequestStreamConsumerTests(TestCase):
         self.assertEqual(consumed, 1)
         request_log = RequestLog.objects.get(stream_id="1757145600000-0")
         self.assertEqual(request_log.path, "/api/orders/1/")
+        self.assertEqual(request_log.query_string, "search=%27+OR+%271%27%3D%271")
         self.assertEqual(request_log.user, user)
         self.assertEqual(request_log.token_jti, "token-id")
         redis_client.xack.assert_called_once_with(
@@ -180,10 +189,11 @@ class LabelRequestDatasetCommandTests(TestCase):
     def setUp(self):
         self.window_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def make_log(self, stream_id, created_at, path="/api/health/"):
+    def make_log(self, stream_id, created_at, path="/api/health/", query_string=""):
         return RequestLog.objects.create(
             stream_id=stream_id,
             path=path,
+            query_string=query_string,
             method="GET",
             status_code=200,
             duration_ms=1.5,
@@ -200,7 +210,10 @@ class LabelRequestDatasetCommandTests(TestCase):
             "normal-1", self.window_start + timedelta(seconds=5), path="/api/products/"
         )
         self.make_log(
-            "attack-1", self.window_start + timedelta(seconds=65), path="/api/orders/1/"
+            "attack-1",
+            self.window_start + timedelta(seconds=65),
+            path="/api/orders/1/",
+            query_string="search=%27+OR+%271%27%3D%271",
         )
         manifest = self.write_manifest(
             [
@@ -234,6 +247,9 @@ class LabelRequestDatasetCommandTests(TestCase):
         self.assertEqual(by_path["/api/products/"]["label"], "normal")
         self.assertEqual(by_path["/api/orders/1/"]["label"], "attack")
         self.assertEqual(by_path["/api/orders/1/"]["scenario"], "id-enumeration")
+        self.assertEqual(
+            by_path["/api/orders/1/"]["query_string"], "search=%27+OR+%271%27%3D%271"
+        )
 
     def test_rows_outside_every_window_are_excluded(self):
         self.make_log("in-window", self.window_start + timedelta(seconds=5))

@@ -38,6 +38,7 @@ class RequestTelemetryMiddleware:
                 {
                     "occurred_at_ms": str(time.time_ns() // 1_000_000),
                     "path": request.path[:2048],
+                    "query_string": request.META.get("QUERY_STRING", "")[:2048],
                     "method": request.method[:10],
                     "status_code": str(status_code),
                     "duration_ms": f"{duration_ms:.6f}",

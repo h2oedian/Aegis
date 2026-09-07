@@ -5,4 +5,5 @@ celery[redis]>=5.4,<6.0
 gunicorn>=23.0,<24.0
 scikit-learn>=1.5,<2.0
 joblib>=1.4,<2.0
+matplotlib>=3.9,<4.0
 

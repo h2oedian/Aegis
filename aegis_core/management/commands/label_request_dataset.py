@@ -9,6 +9,7 @@ from aegis_core.models import RequestLog
 FIELDNAMES = (
     "created_at",
     "path",
+    "query_string",
     "method",
     "status_code",
     "duration_ms",
@@ -38,6 +39,7 @@ def labeled_rows(windows):
             yield {
                 "created_at": log.created_at.isoformat(),
                 "path": log.path,
+                "query_string": log.query_string,
                 "method": log.method,
                 "status_code": log.status_code,
                 "duration_ms": log.duration_ms,

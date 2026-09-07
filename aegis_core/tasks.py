@@ -44,6 +44,7 @@ def _to_request_logs(messages):
             RequestLog(
                 stream_id=stream_id,
                 path=fields.get("path", "")[:2048],
+                query_string=fields.get("query_string", "")[:2048],
                 method=fields.get("method", "")[:10],
                 status_code=int(fields.get("status_code", 0)),
                 duration_ms=float(fields.get("duration_ms", 0)),

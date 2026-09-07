@@ -25,9 +25,13 @@ PostgreSQL. Messages are acknowledged only after storage, and unique stream
 IDs make retries idempotent. If Redis is unavailable, telemetry fails open so
 the protected API remains available.
 
-Stored fields include path, method, response status, duration, client IP, user
-agent, authenticated user, and token JTI. Request bodies, cookies, credentials,
-and raw tokens are deliberately excluded.
+Stored fields include path, query string, method, response status, duration,
+client IP, user agent, authenticated user, and token JTI. Request bodies,
+cookies, credentials, and raw tokens are deliberately excluded. The query
+string *is* captured (added during threshold calibration, below) because the
+rule engine's SQLi/XSS signatures need it -- those payloads travel in query
+params, and without them stored, injection attempts were indistinguishable
+from ordinary traffic once they were no longer live requests.
 
 ## Attack simulator (aegis-sim)
 
@@ -202,3 +206,32 @@ calibration is a later, separate step.
 blends the rule engine's score (Day 7-8) with the model's score into the
 final 0-100 risk score, as the roadmap specifies. Like the rule engine and
 rate limiter, none of this is wired into live request handling yet.
+
+## Threshold calibration
+
+`aegis_ml.calibration` replays a labeled dataset through both halves of the
+final score -- the rule engine (recomputed live from that IP's stored
+`RequestLog` history, same as production) and a trained `AnomalyModel` -- and
+sweeps thresholds on the combined score to find the one with the best recall
+that still keeps the false-positive rate under a target (3% by default, per
+the roadmap):
+
+```bash
+python manage.py calibrate_thresholds \
+  --dataset dataset.csv --model models/isolation_forest.joblib \
+  --max-fpr 0.03 --curve-output pr_curve.png --report-output calibration_report.json
+```
+
+This plots the precision/recall curve to `pr_curve.png` and writes
+`calibration_report.json` with the chosen threshold's precision/recall/F1/FPR
+and up to 20 false positives and false negatives each (IP, path, timestamp,
+scenario, both sub-scores) for actually inspecting what got misclassified,
+not just counting it.
+
+Building this surfaced a real gap: request telemetry stored `path` but never
+the query string, so a SQLi/XSS payload sent as `?search=...` was
+indistinguishable from ordinary traffic once it was no longer a live
+request -- the signature rule had nothing to match against on replay. Fixed
+by adding `RequestLog.query_string` (migration `0004`) and publishing it from
+the middleware; `label_request_dataset` now exports it too, and calibration
+decodes it back into query params before handing it to the rule engine.

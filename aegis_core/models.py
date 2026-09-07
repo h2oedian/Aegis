@@ -6,6 +6,7 @@ from django.utils import timezone
 class RequestLog(models.Model):
     stream_id = models.CharField(max_length=64, null=True, unique=True, editable=False)
     path = models.CharField(max_length=2048, db_index=True)
+    query_string = models.CharField(max_length=2048, blank=True)
     method = models.CharField(max_length=10, db_index=True)
     status_code = models.PositiveSmallIntegerField(db_index=True)
     duration_ms = models.FloatField()

@@ -15,9 +15,10 @@ class RequestLogAdmin(admin.ModelAdmin):
         "user",
     )
     list_filter = ("method", "status_code", "created_at")
-    search_fields = ("path", "ip_address", "user_agent", "token_jti")
+    search_fields = ("path", "query_string", "ip_address", "user_agent", "token_jti")
     readonly_fields = (
         "path",
+        "query_string",
         "method",
         "status_code",
         "duration_ms",

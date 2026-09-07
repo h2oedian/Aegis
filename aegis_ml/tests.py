@@ -1,4 +1,5 @@
 import csv
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -12,6 +13,14 @@ from django.test import TestCase
 from aegis_core.models import RequestLog
 from aegis_core.paths import normalize_path
 
+from .calibration import (
+    EvaluationSample,
+    build_evaluation_samples,
+    metrics_at_threshold,
+    misclassified_samples,
+    select_threshold_for_target_fpr,
+    sweep_thresholds,
+)
 from .features import extract_features, extract_window_features
 from .model import FEATURE_NAMES, AnomalyModel, ScoreCalibration
 from .risk import combined_risk_score
@@ -343,6 +352,266 @@ class TrainAnomalyModelsCommandTests(TestCase):
 
         loaded_model = joblib.load(output_dir / "isolation_forest.joblib")
         self.assertIn("w1m_request_count", loaded_model.feature_names)
+
+
+def _sample(label, rule_score, model_score, *, ip="203.0.113.60", path="/api/health/", scenario=""):
+    return EvaluationSample(
+        label=label,
+        rule_score=rule_score,
+        model_score=model_score,
+        ip_address=ip,
+        path=path,
+        created_at=datetime(2026, 1, 1, tzinfo=dt_timezone.utc),
+        scenario=scenario,
+    )
+
+
+class RequestCountFakeModel:
+    """Module-level (picklable) stand-in model for the calibration command test."""
+
+    def score(self, features):
+        return min(100.0, features["w1m_request_count"] * 10)
+
+
+class MetricsAtThresholdTests(unittest.TestCase):
+    def test_counts_confusion_matrix_and_derived_metrics(self):
+        samples = [
+            _sample("normal", 10, 0, path="/quiet"),
+            _sample("normal", 60, 0, path="/noisy-but-fine"),
+            _sample("attack", 80, 0, path="/caught"),
+            _sample("attack", 20, 0, path="/missed"),
+        ]
+
+        metrics = metrics_at_threshold(samples, 50, rule_weight=1.0)
+
+        self.assertEqual(metrics.true_positives, 1)
+        self.assertEqual(metrics.false_positives, 1)
+        self.assertEqual(metrics.true_negatives, 1)
+        self.assertEqual(metrics.false_negatives, 1)
+        self.assertAlmostEqual(metrics.precision, 0.5)
+        self.assertAlmostEqual(metrics.recall, 0.5)
+        self.assertAlmostEqual(metrics.false_positive_rate, 0.5)
+        self.assertAlmostEqual(metrics.f1, 0.5)
+
+    def test_zero_denominators_do_not_raise(self):
+        metrics = metrics_at_threshold([], 50, rule_weight=1.0)
+        self.assertEqual(metrics.precision, 0.0)
+        self.assertEqual(metrics.recall, 0.0)
+        self.assertEqual(metrics.false_positive_rate, 0.0)
+        self.assertEqual(metrics.f1, 0.0)
+
+
+class SweepThresholdsTests(unittest.TestCase):
+    def test_covers_the_full_0_to_100_range(self):
+        curve = sweep_thresholds([], rule_weight=1.0, step=1.0)
+        self.assertEqual(len(curve), 101)
+        self.assertEqual(curve[0].threshold, 0.0)
+        self.assertEqual(curve[-1].threshold, 100.0)
+
+
+class SelectThresholdForTargetFprTests(unittest.TestCase):
+    def test_picks_the_lowest_threshold_meeting_the_target(self):
+        normal_samples = [_sample("normal", score, 0) for score in range(100)]
+        attack_samples = [_sample("attack", 100, 0) for _ in range(10)]
+
+        result = select_threshold_for_target_fpr(
+            normal_samples + attack_samples, rule_weight=1.0, max_fpr=0.03
+        )
+
+        self.assertTrue(result.target_met)
+        self.assertEqual(result.chosen.threshold, 97.0)
+        self.assertAlmostEqual(result.chosen.recall, 1.0)
+
+    def test_reports_when_the_target_is_unreachable(self):
+        normal_samples = [_sample("normal", 0, 0) for _ in range(8)] + [
+            _sample("normal", 100, 0) for _ in range(2)
+        ]
+
+        result = select_threshold_for_target_fpr(normal_samples, rule_weight=1.0, max_fpr=0.03)
+
+        self.assertFalse(result.target_met)
+        self.assertGreater(result.chosen.false_positive_rate, 0.03)
+
+
+class MisclassifiedSamplesTests(unittest.TestCase):
+    def test_separates_false_positives_and_false_negatives(self):
+        samples = [
+            _sample("normal", 10, 0, path="/quiet"),
+            _sample("normal", 90, 0, path="/loud-but-fine"),
+            _sample("attack", 95, 0, path="/caught"),
+            _sample("attack", 5, 0, path="/missed"),
+        ]
+
+        result = misclassified_samples(samples, 50, rule_weight=1.0)
+
+        self.assertEqual([s.path for s in result["false_positives"]], ["/loud-but-fine"])
+        self.assertEqual([s.path for s in result["false_negatives"]], ["/missed"])
+
+    def test_respects_the_limit(self):
+        samples = [_sample("normal", 90, 0, path=f"/fp-{i}") for i in range(5)]
+
+        result = misclassified_samples(samples, 50, rule_weight=1.0, limit=2)
+
+        self.assertEqual(len(result["false_positives"]), 2)
+
+
+class BuildEvaluationSamplesTests(TestCase):
+    def write_csv(self, path, rows):
+        with open(path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["created_at", "ip_address", "path", "query_string", "label", "scenario"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def test_recomputes_rule_score_from_stored_history(self):
+        ip = "203.0.113.70"
+        now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
+        for offset in range(6):
+            RequestLog.objects.create(
+                ip_address=ip,
+                path="/api/auth/login/",
+                method="POST",
+                status_code=401,
+                duration_ms=1.0,
+                created_at=now - timedelta(seconds=offset),
+            )
+
+        csv_path = Path(tempfile.mkdtemp()) / "dataset.csv"
+        self.write_csv(
+            csv_path,
+            [
+                {
+                    "created_at": now.isoformat(),
+                    "ip_address": ip,
+                    "path": "/api/auth/login/",
+                    "query_string": "",
+                    "label": "attack",
+                    "scenario": "brute-force",
+                }
+            ],
+        )
+
+        class FixedScoreModel:
+            def score(self, features):
+                return 42.0
+
+        samples = build_evaluation_samples(str(csv_path), FixedScoreModel())
+
+        self.assertEqual(len(samples), 1)
+        sample = samples[0]
+        self.assertEqual(sample.label, "attack")
+        self.assertGreater(sample.rule_score, 0)  # unauthorized_attempts rule fires
+        self.assertEqual(sample.model_score, 42.0)
+        self.assertEqual(sample.scenario, "brute-force")
+
+    def test_decodes_the_query_string_for_signature_detection(self):
+        ip = "203.0.113.71"
+        now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
+        csv_path = Path(tempfile.mkdtemp()) / "dataset.csv"
+        self.write_csv(
+            csv_path,
+            [
+                {
+                    "created_at": now.isoformat(),
+                    "ip_address": ip,
+                    "path": "/api/products/",
+                    "query_string": "search=%27+OR+%271%27%3D%271",
+                    "label": "attack",
+                    "scenario": "injection-probes",
+                }
+            ],
+        )
+
+        class ZeroScoreModel:
+            def score(self, features):
+                return 0.0
+
+        samples = build_evaluation_samples(str(csv_path), ZeroScoreModel())
+
+        self.assertEqual(len(samples), 1)
+        self.assertGreater(samples[0].rule_score, 0)  # injection_signature rule fires
+
+
+class CalibrateThresholdsCommandTests(TestCase):
+    def test_produces_a_report_and_curve_meeting_the_target(self):
+        base_time = datetime(2026, 6, 1, tzinfo=dt_timezone.utc)
+        rows = []
+        for index in range(30):
+            ip = f"10.1.0.{index}"
+            RequestLog.objects.create(
+                ip_address=ip,
+                path="/api/health/",
+                method="GET",
+                status_code=200,
+                duration_ms=1.0,
+                created_at=base_time,
+            )
+            rows.append(
+                {
+                    "created_at": base_time.isoformat(),
+                    "ip_address": ip,
+                    "path": "/api/health/",
+                    "query_string": "",
+                    "label": "normal",
+                    "scenario": "normal-traffic",
+                }
+            )
+
+        attack_ip = "10.1.1.1"
+        for offset in range(20):
+            RequestLog.objects.create(
+                ip_address=attack_ip,
+                path="/api/products/",
+                method="GET",
+                status_code=200,
+                duration_ms=1.0,
+                created_at=base_time - timedelta(seconds=offset),
+            )
+        rows.append(
+            {
+                "created_at": base_time.isoformat(),
+                "ip_address": attack_ip,
+                "path": "/api/products/",
+                "query_string": "",
+                "label": "attack",
+                "scenario": "scrape",
+            }
+        )
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        csv_path = tmp_dir / "dataset.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["created_at", "ip_address", "path", "query_string", "label", "scenario"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+        model_path = tmp_dir / "fake_model.joblib"
+        joblib.dump(RequestCountFakeModel(), model_path)
+
+        curve_path = tmp_dir / "pr_curve.png"
+        report_path = tmp_dir / "calibration_report.json"
+
+        call_command(
+            "calibrate_thresholds",
+            dataset=str(csv_path),
+            model=str(model_path),
+            curve_output=str(curve_path),
+            report_output=str(report_path),
+        )
+
+        self.assertTrue(curve_path.exists())
+        self.assertGreater(curve_path.stat().st_size, 0)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["target_met"])
+        self.assertEqual(report["chosen_threshold"], 6.0)
+        self.assertEqual(report["recall"], 1.0)
+        self.assertEqual(report["false_positive_rate"], 0.0)
 
 
 if __name__ == "__main__":
