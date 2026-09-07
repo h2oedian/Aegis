@@ -150,3 +150,31 @@ The Lua script's atomicity is only meaningful against a real Redis — the test
 suite includes a live test class (`TokenBucketRateLimiterLiveTests`) that
 fires 20 concurrent requests at a 5-token bucket and asserts exactly 5 get
 through; it skips itself automatically when Redis isn't reachable.
+
+## Feature extraction
+
+`aegis_ml.features.extract_features(ip_address, now)` turns one IP's recent
+`RequestLog` history into the numeric feature vector the anomaly model
+(Phase 3, next) will train and score on. It computes, over trailing 1, 5, and
+60 minute windows (keys prefixed `w1m_`, `w5m_`, `w60m_`):
+
+- `request_count` / `request_rate_per_second`
+- `unique_endpoints` — distinct endpoints, with numeric IDs collapsed via
+  `aegis_core.paths.normalize_path` so `/orders/7/` and `/orders/8/` count as
+  one endpoint, not two
+- `error_ratio` — share of responses with status >= 400
+- `mean_interval_seconds` / `stdev_interval_seconds` / `interval_entropy` —
+  timing between consecutive requests; a bot hitting at a near-constant rate
+  has low entropy, irregular human pacing has higher entropy
+- `method_get_ratio` / `method_post_ratio` / `method_other_ratio`
+- `unique_user_agents`
+
+A cyclical `hour_sin`/`hour_cos` pair (rather than a raw 0-23 integer) is
+added once per vector, so hour 23 and hour 0 read as adjacent to a
+distance-based model instead of maximally far apart.
+
+```python
+from aegis_ml.features import extract_features
+
+extract_features("203.0.113.10")  # -> {"w1m_request_count": 3, ..., "hour_sin": 0.71, ...}
+```

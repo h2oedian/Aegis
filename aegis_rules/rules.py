@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timedelta
 
 from aegis_core.models import RequestLog
+from aegis_core.paths import normalize_path
 
 from .base import RuleResult
 
@@ -69,10 +70,6 @@ def not_found_rate_rule(
     )
 
 
-def _id_template(path: str) -> str:
-    return _TRAILING_ID_PATTERN.sub("{id}", path)
-
-
 def _longest_sequential_run(ids: list[int]) -> int:
     if not ids:
         return 0
@@ -107,7 +104,7 @@ def sequential_id_scan_rule(
         match = _TRAILING_ID_PATTERN.search(log.path)
         if not match:
             continue
-        ids_by_template.setdefault(_id_template(log.path), []).append(int(match.group()))
+        ids_by_template.setdefault(normalize_path(log.path), []).append(int(match.group()))
 
     longest_run = max((_longest_sequential_run(ids) for ids in ids_by_template.values()), default=0)
     return RuleResult(
