@@ -1,0 +1,14 @@
+{
+  "threshold": 63.0,
+  "detection_threshold": 63.0,
+  "rule_weight": 0.5,
+  "sample_count": 1215,
+  "precision": 0.8879668049792531,
+  "recall": 0.9511111111111111,
+  "f1": 0.9184549356223176,
+  "false_positive_rate": 0.02727272727272727,
+  "windows_evaluated": 4,
+  "windows_detected": 4,
+  "windows_missed": 0,
+  "mean_seconds": 3.275
+}

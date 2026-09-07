@@ -443,3 +443,51 @@ places I'd look are `DecisionEngine`'s two Redis round trips per cache-miss
 request and the rule engine's per-rule `RequestLog` queries (Day 7-8's
 `(ip_address, created_at)` / `(status_code, created_at)` indexes should keep
 those cheap, but worth confirming against `EXPLAIN ANALYZE` before assuming).
+
+## Final evaluation
+
+```bash
+python manage.py evaluation_report \
+  --dataset dataset.csv --manifest dataset_manifest.json \
+  --model models/isolation_forest.joblib --threshold <from calibrate_thresholds> \
+  --score-dist-output score_distribution.png --latency-output detection_latency.png
+```
+
+Reuses Day 14's `build_evaluation_samples`/`metrics_at_threshold` for the
+headline numbers, and adds one thing Day 14 didn't compute: mean time to
+detection. For every attack window in the campaign manifest,
+`compute_detection_latencies` (`aegis_ml/evaluation.py`) finds the first
+request inside it whose combined score reaches the detection threshold and
+measures the gap from the window's start; `mean_time_to_detection` averages
+that across every window that was ever caught, and separately counts the
+ones that never were. Two charts get saved alongside the PR curve: a
+normal-vs-attack score-distribution histogram (does the model actually
+separate the two, visually) and a time-to-detection histogram.
+
+**Numbers below are from a locally-generated demonstration run, not a real
+`docker compose` deployment** -- Docker wasn't available for this session
+(see Load testing, above, for the same caveat). I generated ~55 minutes of
+synthetic traffic directly against `RequestLog` (990 normal requests across
+30 IPs, plus four back-to-back attack bursts -- brute-force, scrape,
+id-enumeration, injection-probes -- 225 requests total, `seed_evaluation_demo.py`-style,
+not committed since it's a one-off demo generator, not part of the app),
+trained both models on it, calibrated a threshold the same way Day 14 does,
+and ran this command for real. The pipeline is exercised end-to-end and the
+numbers are real outputs of real code -- just not from production-shaped
+traffic, so treat them as "the tooling works, and roughly what a clean
+separation looks like," not as a benchmark to cite.
+
+| Metric | Value |
+|---|---|
+| Precision | 0.89 |
+| Recall | 0.95 |
+| F1 | 0.92 |
+| False positive rate | 2.7% |
+| Mean time to detection | 3.3s (4/4 attack windows caught) |
+
+![Score distribution: normal vs attack](docs/evaluation/score_distribution.png)
+![Precision/recall across thresholds](docs/evaluation/pr_curve.png)
+![Time from attack start to detection](docs/evaluation/detection_latency.png)
+
+Re-run this against a real `aegis-sim-dataset` campaign (Day 6) over a real
+deployment for numbers worth citing in an actual writeup.

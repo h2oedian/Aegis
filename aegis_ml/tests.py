@@ -38,6 +38,7 @@ from .decision import (
     DecisionEngine,
     classify_score,
 )
+from .evaluation import DetectionLatency, compute_detection_latencies, mean_time_to_detection
 from .features import extract_features, extract_window_features
 from .middleware import AdaptiveResponseMiddleware
 from .model import FEATURE_NAMES, AnomalyModel, ScoreCalibration
@@ -372,14 +373,23 @@ class TrainAnomalyModelsCommandTests(TestCase):
         self.assertIn("w1m_request_count", loaded_model.feature_names)
 
 
-def _sample(label, rule_score, model_score, *, ip="203.0.113.60", path="/api/health/", scenario=""):
+def _sample(
+    label,
+    rule_score,
+    model_score,
+    *,
+    ip="203.0.113.60",
+    path="/api/health/",
+    scenario="",
+    created_at=None,
+):
     return EvaluationSample(
         label=label,
         rule_score=rule_score,
         model_score=model_score,
         ip_address=ip,
         path=path,
-        created_at=datetime(2026, 1, 1, tzinfo=dt_timezone.utc),
+        created_at=created_at or datetime(2026, 1, 1, tzinfo=dt_timezone.utc),
         scenario=scenario,
     )
 
@@ -843,6 +853,192 @@ class AdaptiveResponseMiddlewareEnforcingTests(TestCase):
             response = self.client.get("/api/health/")
 
         self.assertEqual(response.status_code, 200)
+
+
+class ComputeDetectionLatenciesTests(unittest.TestCase):
+    def setUp(self):
+        self.window_start = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
+        self.window = {
+            "label": "attack",
+            "scenario": "brute-force",
+            "started_at": self.window_start.isoformat(),
+            "ended_at": (self.window_start + timedelta(minutes=5)).isoformat(),
+        }
+
+    def test_latency_is_measured_from_the_window_start_to_the_first_crossing_sample(self):
+        samples = [
+            _sample("attack", 10, 0, created_at=self.window_start + timedelta(seconds=10)),
+            _sample("attack", 90, 0, created_at=self.window_start + timedelta(seconds=45)),
+            _sample("attack", 95, 0, created_at=self.window_start + timedelta(seconds=90)),
+        ]
+
+        latencies = compute_detection_latencies(
+            [self.window], samples, rule_weight=1.0, detection_threshold=60.0
+        )
+
+        self.assertEqual(len(latencies), 1)
+        self.assertEqual(latencies[0].latency_seconds, 45.0)
+
+    def test_a_window_with_no_crossing_sample_is_never_detected(self):
+        samples = [
+            _sample("attack", 10, 0, created_at=self.window_start + timedelta(seconds=10)),
+            _sample("attack", 20, 0, created_at=self.window_start + timedelta(seconds=20)),
+        ]
+
+        latencies = compute_detection_latencies(
+            [self.window], samples, rule_weight=1.0, detection_threshold=60.0
+        )
+
+        self.assertIsNone(latencies[0].detected_at)
+        self.assertIsNone(latencies[0].latency_seconds)
+
+    def test_normal_windows_are_skipped(self):
+        normal_window = {**self.window, "label": "normal"}
+        samples = [_sample("normal", 90, 0, created_at=self.window_start + timedelta(seconds=5))]
+
+        latencies = compute_detection_latencies(
+            [normal_window], samples, rule_weight=1.0, detection_threshold=60.0
+        )
+
+        self.assertEqual(latencies, [])
+
+    def test_samples_outside_the_window_are_ignored(self):
+        samples = [_sample("attack", 90, 0, created_at=self.window_start - timedelta(seconds=5))]
+
+        latencies = compute_detection_latencies(
+            [self.window], samples, rule_weight=1.0, detection_threshold=60.0
+        )
+
+        self.assertIsNone(latencies[0].detected_at)
+
+
+class MeanTimeToDetectionTests(unittest.TestCase):
+    def test_averages_only_the_detected_windows(self):
+        latencies = [
+            DetectionLatency("brute-force", datetime(2026, 1, 1, tzinfo=dt_timezone.utc), datetime(2026, 1, 1, 0, 0, 10, tzinfo=dt_timezone.utc)),
+            DetectionLatency("scrape", datetime(2026, 1, 1, tzinfo=dt_timezone.utc), datetime(2026, 1, 1, 0, 0, 30, tzinfo=dt_timezone.utc)),
+            DetectionLatency("injection-probes", datetime(2026, 1, 1, tzinfo=dt_timezone.utc), None),
+        ]
+
+        result = mean_time_to_detection(latencies)
+
+        self.assertEqual(result["windows_evaluated"], 3)
+        self.assertEqual(result["windows_detected"], 2)
+        self.assertEqual(result["windows_missed"], 1)
+        self.assertAlmostEqual(result["mean_seconds"], 20.0)
+
+    def test_no_windows_at_all_is_well_defined(self):
+        result = mean_time_to_detection([])
+        self.assertEqual(result["windows_evaluated"], 0)
+        self.assertIsNone(result["mean_seconds"])
+
+    def test_all_windows_missed_gives_no_mean(self):
+        latencies = [DetectionLatency("scrape", datetime(2026, 1, 1, tzinfo=dt_timezone.utc), None)]
+        result = mean_time_to_detection(latencies)
+        self.assertEqual(result["windows_missed"], 1)
+        self.assertIsNone(result["mean_seconds"])
+
+
+class EvaluationReportCommandTests(TestCase):
+    def test_produces_a_report_with_charts_and_mttd(self):
+        base_time = datetime(2026, 7, 1, tzinfo=dt_timezone.utc)
+        attack_ip = "10.2.0.1"
+
+        rows = []
+        for index in range(15):
+            offset = base_time + timedelta(seconds=index * 5)
+            RequestLog.objects.create(
+                ip_address=attack_ip,
+                path="/api/auth/login/",
+                method="POST",
+                status_code=200,
+                duration_ms=1.0,
+                created_at=offset,
+            )
+            rows.append(
+                {
+                    "created_at": offset.isoformat(),
+                    "ip_address": attack_ip,
+                    "path": "/api/auth/login/",
+                    "query_string": "",
+                    "label": "attack",
+                    "scenario": "brute-force",
+                }
+            )
+
+        normal_ip = "10.2.1.1"
+        normal_time = base_time
+        RequestLog.objects.create(
+            ip_address=normal_ip,
+            path="/api/health/",
+            method="GET",
+            status_code=200,
+            duration_ms=1.0,
+            created_at=normal_time,
+        )
+        rows.append(
+            {
+                "created_at": normal_time.isoformat(),
+                "ip_address": normal_ip,
+                "path": "/api/health/",
+                "query_string": "",
+                "label": "normal",
+                "scenario": "normal-traffic",
+            }
+        )
+
+        manifest = [
+            {
+                "label": "attack",
+                "scenario": "brute-force",
+                "started_at": base_time.isoformat(),
+                "ended_at": (base_time + timedelta(minutes=5)).isoformat(),
+            }
+        ]
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        dataset_path = tmp_dir / "dataset.csv"
+        with open(dataset_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["created_at", "ip_address", "path", "query_string", "label", "scenario"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+        manifest_path = tmp_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        model_path = tmp_dir / "fake_model.joblib"
+        joblib.dump(RequestCountFakeModel(), model_path)
+
+        score_dist_path = tmp_dir / "score_distribution.png"
+        latency_path = tmp_dir / "detection_latency.png"
+        report_path = tmp_dir / "evaluation_report.json"
+
+        call_command(
+            "evaluation_report",
+            dataset=str(dataset_path),
+            manifest=str(manifest_path),
+            model=str(model_path),
+            threshold=50.0,
+            score_dist_output=str(score_dist_path),
+            latency_output=str(latency_path),
+            report_output=str(report_path),
+        )
+
+        self.assertTrue(score_dist_path.exists())
+        self.assertGreater(score_dist_path.stat().st_size, 0)
+        self.assertTrue(latency_path.exists())
+        self.assertGreater(latency_path.stat().st_size, 0)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["sample_count"], 16)
+        self.assertEqual(report["windows_evaluated"], 1)
+        self.assertIn("precision", report)
+        self.assertIn("recall", report)
+        self.assertIn("f1", report)
+        self.assertIn("false_positive_rate", report)
 
 
 if __name__ == "__main__":
