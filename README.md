@@ -178,3 +178,27 @@ from aegis_ml.features import extract_features
 
 extract_features("203.0.113.10")  # -> {"w1m_request_count": 3, ..., "hour_sin": 0.71, ...}
 ```
+
+## Anomaly model and combined risk score
+
+Train an Isolation Forest (and a One-Class SVM for comparison) on the
+`normal`-labeled rows of a `label_request_dataset` CSV:
+
+```bash
+python manage.py train_anomaly_models --dataset dataset.csv --output-dir models/
+```
+
+This recomputes each labeled row's feature vector at its own timestamp
+(`aegis_ml.training.load_training_samples`), fits both estimators on the
+`normal` rows only, and saves each as an `AnomalyModel`
+(`aegis_ml/model.py`) — the fitted estimator plus a `ScoreCalibration` that
+maps its raw `decision_function` output to 0-100 using the 1st/99th
+percentiles of that output over the training set. It also prints a quick
+comparison of both models' mean scores and flag counts on the full dataset,
+as a sanity check before either is trusted — full precision/recall
+calibration is a later, separate step.
+
+`aegis_ml.risk.combined_risk_score(rule_score, model_score, rule_weight=0.5)`
+blends the rule engine's score (Day 7-8) with the model's score into the
+final 0-100 risk score, as the roadmap specifies. Like the rule engine and
+rate limiter, none of this is wired into live request handling yet.
