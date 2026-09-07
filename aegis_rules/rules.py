@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timedelta
 
+from aegis_core.geoip import haversine_km, locate_ip
 from aegis_core.models import RequestLog
 from aegis_core.paths import normalize_path
 
@@ -112,4 +113,69 @@ def sequential_id_scan_rule(
         score=_scale(longest_run, run_threshold),
         triggered=longest_run >= run_threshold,
         detail=f"longest sequential run: {longest_run}",
+    )
+
+
+def impossible_travel_rule(
+    user_id: int | None,
+    current_ip: str | None,
+    now: datetime,
+    *,
+    window: timedelta = timedelta(hours=6),
+    max_plausible_speed_kmh: float = 900.0,  # roughly commercial-airliner cruise speed
+    locate=locate_ip,
+) -> RuleResult:
+    """Score a user's requests implying faster-than-physically-possible travel.
+
+    Grouped by ``user_id``, not IP -- by definition the two points being
+    compared come from different IPs, so IP can't be the lookup key here
+    the way it is for every other rule.
+    """
+    if not user_id or not current_ip:
+        return RuleResult("impossible_travel", 0.0, False, "no authenticated user or ip")
+
+    current_location = locate(current_ip)
+    if current_location is None:
+        return RuleResult("impossible_travel", 0.0, False, "current location unavailable")
+
+    previous = (
+        RequestLog.objects.filter(user_id=user_id, created_at__gte=now - window, created_at__lt=now)
+        .exclude(ip_address=current_ip)
+        .exclude(ip_address__isnull=True)
+        .order_by("-created_at")
+        .first()
+    )
+    if previous is None:
+        return RuleResult("impossible_travel", 0.0, False, "no prior location to compare")
+
+    previous_location = locate(previous.ip_address)
+    if previous_location is None:
+        return RuleResult("impossible_travel", 0.0, False, "previous location unavailable")
+
+    elapsed_hours = max((now - previous.created_at).total_seconds() / 3600.0, 1e-6)
+    distance_km = haversine_km(*previous_location, *current_location)
+    implied_speed_kmh = distance_km / elapsed_hours
+
+    return RuleResult(
+        rule="impossible_travel",
+        score=_scale(implied_speed_kmh, max_plausible_speed_kmh),
+        triggered=implied_speed_kmh >= max_plausible_speed_kmh,
+        detail=f"{distance_km:.0f}km in {elapsed_hours:.2f}h implies {implied_speed_kmh:.0f}km/h",
+    )
+
+
+def device_fingerprint_rule(
+    token_fingerprint: str | None, request_fingerprint: str | None
+) -> RuleResult:
+    """Score a request whose device fingerprint doesn't match the one its
+    access token was issued to (aegis_core.tokens/fingerprint)."""
+    if not token_fingerprint or not request_fingerprint:
+        return RuleResult("device_fingerprint_mismatch", 0.0, False, "no fingerprint to compare")
+    if token_fingerprint == request_fingerprint:
+        return RuleResult("device_fingerprint_mismatch", 0.0, False, "matches the token's device")
+    return RuleResult(
+        rule="device_fingerprint_mismatch",
+        score=60.0,
+        triggered=True,
+        detail="request fingerprint does not match the token's bound device",
     )

@@ -3,7 +3,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone as dt_timezone
 
 from django.utils import timezone
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from .models import RefreshTokenRecord
 from .token_denylist import deny_family, deny_jti, is_family_revoked, is_jti_denied
@@ -19,26 +21,33 @@ class TokenPair:
     access: str
 
 
-def _record_for(refresh_token: RefreshToken, family_id: str, user) -> RefreshTokenRecord:
+def _record_for(
+    refresh_token: RefreshToken, family_id: str, user, fingerprint: str | None
+) -> RefreshTokenRecord:
     return RefreshTokenRecord.objects.create(
         jti=str(refresh_token["jti"]),
         family_id=family_id,
         user=user,
+        fingerprint=fingerprint or "",
         expires_at=datetime.fromtimestamp(refresh_token["exp"], tz=dt_timezone.utc),
     )
 
 
-def _issue_pair(user, family_id: str) -> TokenPair:
+def _issue_pair(user, family_id: str, fingerprint: str | None = None) -> TokenPair:
     refresh = RefreshToken.for_user(user)
     refresh["family_id"] = family_id
-    _record_for(refresh, family_id, user)
+    if fingerprint:
+        refresh["fingerprint"] = fingerprint
+    _record_for(refresh, family_id, user, fingerprint)
     access = refresh.access_token
     return TokenPair(refresh=str(refresh), access=str(access))
 
 
-def issue_initial_pair(user) -> TokenPair:
-    """Start a brand new token family, e.g. on login."""
-    return _issue_pair(user, family_id=str(uuid.uuid4()))
+def issue_initial_pair(user, *, fingerprint: str | None = None) -> TokenPair:
+    """Start a brand new token family, e.g. on login. ``fingerprint`` (see
+    aegis_core.fingerprint) binds every token in the family to this device
+    for the rest of its life -- rotation carries it forward unchanged."""
+    return _issue_pair(user, family_id=str(uuid.uuid4()), fingerprint=fingerprint)
 
 
 def rotate_refresh_token(raw_refresh_token: str) -> TokenPair:
@@ -79,7 +88,7 @@ def rotate_refresh_token(raw_refresh_token: str) -> TokenPair:
     record.save(update_fields=["used_at"])
     deny_jti(jti)
 
-    return _issue_pair(record.user, family_id)
+    return _issue_pair(record.user, family_id, fingerprint=record.fingerprint)
 
 
 def _revoke_family(family_id: str) -> None:
@@ -87,3 +96,30 @@ def _revoke_family(family_id: str) -> None:
         revoked_at=timezone.now()
     )
     deny_family(family_id)
+
+
+@dataclass(frozen=True)
+class PeekedClaims:
+    user_id: int | None
+    fingerprint: str | None
+
+
+def peek_access_token(auth_header: str) -> PeekedClaims | None:
+    """Best-effort, unauthenticated peek at an Authorization header's JWT
+    claims -- used only to enrich risk scoring (the impossible-travel and
+    device-fingerprint rules need an identity/claim, not just an IP), never
+    to grant access. A missing, malformed, expired, or revoked token just
+    means no identity signal is available; enforcement stays entirely with
+    FamilyAwareJWTAuthentication in the actual view.
+    """
+    prefix = "Bearer "
+    if not auth_header.startswith(prefix):
+        return None
+    try:
+        token = AccessToken(auth_header[len(prefix) :])
+    except TokenError:
+        return None
+    return PeekedClaims(
+        user_id=token.payload.get(api_settings.USER_ID_CLAIM),
+        fingerprint=token.payload.get("fingerprint"),
+    )

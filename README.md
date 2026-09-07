@@ -305,3 +305,30 @@ boundary, not just an availability nicety.
 changes: DRF's `Request.auth` setter writes through to the underlying
 `HttpRequest`, so the access token's claims are already visible to
 telemetry, which runs after the view in the middleware chain.
+
+## Device binding and impossible travel
+
+Two more rules feed into the same `RuleEngine` (Day 7-8), scoring context
+that only exists once a client is authenticated:
+
+- **`device_fingerprint_rule`** -- `aegis_core.fingerprint.compute_fingerprint`
+  hashes User-Agent/Accept-Language/Accept-Encoding into a per-device
+  fingerprint (deliberately excluding IP, which is expected to change).
+  `LoginView` binds it to the token family (`RefreshTokenRecord.fingerprint`,
+  carried forward unchanged through every rotation -- see Day 17). A request
+  whose live fingerprint doesn't match its token's bound one scores 60.
+- **`impossible_travel_rule`** -- grouped by authenticated user, not IP
+  (impossible travel is defined *by* an IP changing). Looks up that user's
+  most recent request from a *different* IP within a trailing window,
+  geolocates both IPs (`aegis_core.geoip`, a MaxMind GeoLite2 `.mmdb` file
+  at `AEGIS_GEOIP_DB_PATH` -- unset by default, in which case this rule
+  always scores 0), and scores the implied speed between them against a
+  configurable plausibility ceiling (900 km/h by default).
+
+Both need input `AdaptiveResponseMiddleware` didn't have before: which user
+a request claims to be, and its token's bound fingerprint. Neither is available
+yet when the middleware runs -- authentication happens later, inside the
+view. So the middleware takes a best-effort, unauthenticated peek at the
+Authorization header (`aegis_core.tokens.peek_access_token`) purely to feed
+these two risk signals; it never grants access on the strength of that peek
+-- enforcement is still entirely `FamilyAwareJWTAuthentication`'s job.

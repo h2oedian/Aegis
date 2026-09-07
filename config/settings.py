@@ -129,6 +129,10 @@ AEGIS_ANOMALY_MODEL_PATH = os.getenv(
 AEGIS_DECISION_CACHE_TTL_SECONDS = float(os.getenv("AEGIS_DECISION_CACHE_TTL_SECONDS", "5"))
 AEGIS_BAN_DURATION_SECONDS = int(os.getenv("AEGIS_BAN_DURATION_SECONDS", "300"))
 
+# Path to a MaxMind GeoLite2-City .mmdb file, for the impossible-travel rule.
+# Optional: unset (the default), impossible_travel_rule always scores 0.
+AEGIS_GEOIP_DB_PATH = os.getenv("AEGIS_GEOIP_DB_PATH", "")
+
 # SessionAuthentication stays alongside the JWT class so session-based
 # access (Django admin, and the Phase 5 dashboard) keeps working -- only
 # BasicAuthentication (credentials on every request) is deliberately left

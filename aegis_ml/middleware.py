@@ -3,8 +3,10 @@ import logging
 from django.conf import settings
 from django.http import JsonResponse
 
+from aegis_core.fingerprint import compute_fingerprint
 from aegis_core.rate_limiter import TokenBucketRateLimiter
 from aegis_core.request_meta import client_ip
+from aegis_core.tokens import peek_access_token
 
 from .decision import TIER_ATTACK, TIER_NORMAL, TIER_RISKY, DecisionEngine
 
@@ -36,8 +38,14 @@ class AdaptiveResponseMiddleware:
             self._log(ip_address, TIER_ATTACK, None, shadow_mode, blocked=True)
             return self._blocked_response("temporarily_blocked", None)
 
+        peeked = peek_access_token(request.META.get("HTTP_AUTHORIZATION", ""))
         decision = self._decisions.decide(
-            ip_address=ip_address, path=request.path, query_params=request.GET
+            ip_address=ip_address,
+            path=request.path,
+            query_params=request.GET,
+            user_id=peeked.user_id if peeked else None,
+            token_fingerprint=peeked.fingerprint if peeked else None,
+            request_fingerprint=compute_fingerprint(request),
         )
         request.aegis_decision = decision
 

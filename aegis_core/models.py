@@ -52,6 +52,7 @@ class RefreshTokenRecord(models.Model):
         on_delete=models.CASCADE,
         related_name="aegis_refresh_tokens",
     )
+    fingerprint = models.CharField(max_length=64, blank=True)
     issued_at = models.DateTimeField(default=timezone.now)
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)

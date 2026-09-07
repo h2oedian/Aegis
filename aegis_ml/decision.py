@@ -116,6 +116,9 @@ class DecisionEngine:
         ip_address: str | None,
         path: str,
         query_params: Mapping[str, str] | None = None,
+        user_id: int | None = None,
+        token_fingerprint: str | None = None,
+        request_fingerprint: str | None = None,
         now: datetime | None = None,
     ) -> Decision:
         if ip_address:
@@ -125,7 +128,13 @@ class DecisionEngine:
 
         now = now or timezone.now()
         rule_result = self._engine.evaluate(
-            ip_address=ip_address, path=path, query_params=query_params, now=now
+            ip_address=ip_address,
+            path=path,
+            query_params=query_params,
+            user_id=user_id,
+            token_fingerprint=token_fingerprint,
+            request_fingerprint=request_fingerprint,
+            now=now,
         )
         features = extract_features(ip_address, now) if ip_address else {}
         model_component = model_score(features) if ip_address else 0.0

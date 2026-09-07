@@ -20,12 +20,19 @@ from rest_framework.test import APIRequestFactory
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from .authentication import FamilyAwareJWTAuthentication
+from .fingerprint import compute_fingerprint
+from .geoip import haversine_km, locate_ip
 from .models import RefreshTokenRecord, RequestLog
 from .rate_limiter import TokenBucketRateLimiter, bucket_params_for_score
 from .redis_client import get_redis_client
 from .tasks import consume_request_stream
 from .token_denylist import deny_family, deny_jti, is_family_revoked, is_jti_denied
-from .tokens import TokenTheftDetected, issue_initial_pair, rotate_refresh_token
+from .tokens import (
+    TokenTheftDetected,
+    issue_initial_pair,
+    peek_access_token,
+    rotate_refresh_token,
+)
 
 
 class RequestTelemetryMiddlewareTests(TestCase):
@@ -641,3 +648,94 @@ class AuthEndpointTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 401)
+
+
+class FingerprintTests(TestCase):
+    def _request(self, *, user_agent="curl/8.0", accept_language="en-US", accept_encoding="gzip"):
+        return APIRequestFactory().get(
+            "/api/health/",
+            HTTP_USER_AGENT=user_agent,
+            HTTP_ACCEPT_LANGUAGE=accept_language,
+            HTTP_ACCEPT_ENCODING=accept_encoding,
+        )
+
+    def test_same_headers_produce_the_same_fingerprint(self):
+        self.assertEqual(
+            compute_fingerprint(self._request()), compute_fingerprint(self._request())
+        )
+
+    def test_different_user_agents_produce_different_fingerprints(self):
+        self.assertNotEqual(
+            compute_fingerprint(self._request(user_agent="curl/8.0")),
+            compute_fingerprint(self._request(user_agent="python-requests/2.0")),
+        )
+
+    def test_fingerprint_is_a_sha256_hex_digest(self):
+        fingerprint = compute_fingerprint(self._request())
+        self.assertEqual(len(fingerprint), 64)
+        int(fingerprint, 16)  # raises ValueError if it isn't hex
+
+
+class GeoIPTests(TestCase):
+    def test_haversine_distance_between_known_cities(self):
+        london = (51.5074, -0.1278)
+        paris = (48.8566, 2.3522)
+        distance_km = haversine_km(*london, *paris)
+        self.assertAlmostEqual(distance_km, 344, delta=10)
+
+    def test_haversine_distance_to_self_is_zero(self):
+        point = (35.6892, 51.3890)
+        self.assertAlmostEqual(haversine_km(*point, *point), 0.0, places=6)
+
+    @override_settings(AEGIS_GEOIP_DB_PATH="")
+    def test_locate_ip_returns_none_without_a_configured_database(self):
+        self.assertIsNone(locate_ip("8.8.8.8"))
+
+    def test_locate_ip_returns_none_for_a_missing_ip(self):
+        self.assertIsNone(locate_ip(None))
+
+
+class PeekAccessTokenTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="peek-user")
+
+    def test_returns_the_user_id_and_fingerprint_from_a_valid_token(self):
+        pair = issue_initial_pair(self.user, fingerprint="device-abc")
+
+        peeked = peek_access_token(f"Bearer {pair.access}")
+
+        self.assertEqual(peeked.user_id, self.user.pk)
+        self.assertEqual(peeked.fingerprint, "device-abc")
+
+    def test_returns_none_for_a_missing_bearer_prefix(self):
+        pair = issue_initial_pair(self.user)
+        self.assertIsNone(peek_access_token(pair.access))
+
+    def test_returns_none_for_an_empty_header(self):
+        self.assertIsNone(peek_access_token(""))
+
+    def test_returns_none_for_a_garbage_token(self):
+        self.assertIsNone(peek_access_token("Bearer not-a-real-token"))
+
+
+class TokenFingerprintBindingTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="bind-user")
+
+    def test_initial_issuance_stores_the_fingerprint(self):
+        pair = issue_initial_pair(self.user, fingerprint="device-xyz")
+
+        jti = str(RefreshToken(pair.refresh)["jti"])
+        record = RefreshTokenRecord.objects.get(jti=jti)
+        self.assertEqual(record.fingerprint, "device-xyz")
+        self.assertEqual(AccessToken(pair.access).payload.get("fingerprint"), "device-xyz")
+
+    def test_rotation_carries_the_fingerprint_forward_unchanged(self):
+        initial = issue_initial_pair(self.user, fingerprint="device-xyz")
+
+        rotated = rotate_refresh_token(initial.refresh)
+
+        new_jti = str(RefreshToken(rotated.refresh)["jti"])
+        new_record = RefreshTokenRecord.objects.get(jti=new_jti)
+        self.assertEqual(new_record.fingerprint, "device-xyz")
+        self.assertEqual(AccessToken(rotated.access).payload.get("fingerprint"), "device-xyz")

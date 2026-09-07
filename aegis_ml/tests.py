@@ -8,14 +8,17 @@ from unittest.mock import MagicMock, patch
 
 import joblib
 import numpy as np
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.http import HttpResponse
 from django.test import RequestFactory, TestCase, override_settings
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from aegis_core.fingerprint import compute_fingerprint
 from aegis_core.models import RequestLog
 from aegis_core.paths import normalize_path
 from aegis_core.rate_limiter import RateLimitDecision
+from aegis_core.tokens import issue_initial_pair
 
 from .calibration import (
     EvaluationSample,
@@ -731,6 +734,44 @@ class AdaptiveResponseMiddlewareUnitTests(TestCase):
             AdaptiveResponseMiddleware(probe)(request)
 
         self.assertEqual(captured["decision"], decision)
+
+    def test_passes_the_peeked_identity_and_fingerprint_to_the_decision_engine(self):
+        user = get_user_model().objects.create_user(username="middleware-user")
+        pair = issue_initial_pair(user, fingerprint="device-abc")
+        decision = Decision(score=0.0, tier=TIER_NORMAL, rule_score=0.0, model_score=0.0)
+
+        request = RequestFactory().get(
+            "/api/health/",
+            HTTP_AUTHORIZATION=f"Bearer {pair.access}",
+            HTTP_USER_AGENT="curl/8.0",
+            HTTP_ACCEPT_LANGUAGE="en-US",
+            HTTP_ACCEPT_ENCODING="gzip",
+        )
+        expected_request_fingerprint = compute_fingerprint(request)
+
+        with patch(
+            "aegis_ml.middleware.DecisionEngine.decide", return_value=decision
+        ) as decide:
+            AdaptiveResponseMiddleware(lambda req: HttpResponse("ok"))(request)
+
+        kwargs = decide.call_args.kwargs
+        self.assertEqual(kwargs["user_id"], user.pk)
+        self.assertEqual(kwargs["token_fingerprint"], "device-abc")
+        self.assertEqual(kwargs["request_fingerprint"], expected_request_fingerprint)
+
+    def test_an_unauthenticated_request_has_no_identity_or_token_fingerprint(self):
+        decision = Decision(score=0.0, tier=TIER_NORMAL, rule_score=0.0, model_score=0.0)
+        request = RequestFactory().get("/api/health/")
+
+        with patch(
+            "aegis_ml.middleware.DecisionEngine.decide", return_value=decision
+        ) as decide:
+            AdaptiveResponseMiddleware(lambda req: HttpResponse("ok"))(request)
+
+        kwargs = decide.call_args.kwargs
+        self.assertIsNone(kwargs["user_id"])
+        self.assertIsNone(kwargs["token_fingerprint"])
+        self.assertIsNotNone(kwargs["request_fingerprint"])
 
 
 @override_settings(AEGIS_SHADOW_MODE=False)

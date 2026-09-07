@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 
+from .fingerprint import compute_fingerprint
 from .tokens import TokenTheftDetected, issue_initial_pair, rotate_refresh_token
 
 
@@ -19,7 +20,7 @@ class LoginView(APIView):
         if user is None:
             return Response({"error": "invalid_credentials"}, status=401)
 
-        pair = issue_initial_pair(user)
+        pair = issue_initial_pair(user, fingerprint=compute_fingerprint(request))
         return Response({"refresh": pair.refresh, "access": pair.access})
 
 
