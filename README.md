@@ -367,3 +367,31 @@ The Django admin registers `AuditLog` read-only with delete disabled --
 deleting a row through the admin would be exactly the tampering this log
 exists to catch, so the only way to "remove" one is to leave evidence that
 `verify_audit_log` will find.
+
+## Attack dashboard
+
+A staff-only Django + HTMX dashboard at `/dashboard/` (gated by
+`@staff_member_required`, so it reuses the same session login as
+`/admin/`), built on `dashboard/metrics.py`:
+
+- **Request volume** -- an inline-SVG-free bar chart, one bar per minute
+  over a trailing window, zero-filled so a quiet stretch reads as "quiet"
+  rather than "no data".
+- **High-risk IPs** -- the busiest IPs in the window (capped, since this
+  scores each one live through `RuleEngine`, not from anything
+  pre-aggregated), sorted by score, each with which rules it tripped and
+  a Ban/Unban button.
+- **Attack type breakdown** -- read off that same evaluation pass at no
+  extra query cost: how many of those risky IPs tripped each rule
+  (`unauthorized_attempts`, `sequential_id_scan`, `impossible_travel`, ...)
+  is a reasonable proxy for "what kind of attack", without inventing a
+  taxonomy the rule engine doesn't already have.
+- **Recent events** -- the last N rows of Day 19's `AuditLog`.
+
+Each panel is its own HTMX-polled partial (`hx-trigger="every Ns"`) so the
+page refreshes itself without a full reload. Ban/Unban post to
+`aegis_ml.decision.DecisionEngine.ban`/`.unban` (new this day: `unban` didn't
+exist before, since nothing needed to *reverse* a ban) and record a
+`manual_ban`/`manual_unban` event to the same audit log the automatic
+`attack_blocked` path writes to -- a human overriding the system is exactly
+the kind of thing that log exists to remember.

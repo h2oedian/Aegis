@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Aegis Dashboard</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    :root {
+      --bg: #0f1414; --panel: #171f1f; --line: #2a3535; --ink: #e6efec;
+      --muted: #8fa39d; --accent: #37c9a3; --warn: #d9a441; --crit: #e05a4e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font: 14px/1.5 -apple-system, "Segoe UI", sans-serif;
+    }
+    header { padding: 18px 24px; border-bottom: 1px solid var(--line); }
+    header h1 { margin: 0; font-size: 18px; }
+    header span { color: var(--muted); font-size: 12px; }
+    main { max-width: 1080px; margin: 0 auto; padding: 20px 24px 60px; display: grid; gap: 18px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+    .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 500; }
+    .mono { font-family: ui-monospace, monospace; }
+    .score { font-weight: 600; }
+    .score.risky { color: var(--warn); }
+    .score.attack { color: var(--crit); }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); margin: 1px; }
+    .banned { color: var(--crit); }
+    button { background: var(--accent); border: none; color: #052620; font-weight: 600; padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+    button.unban { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+    form { display: inline; }
+    .chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; }
+    .bar { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 1px; }
+    .empty { color: var(--muted); font-style: italic; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Aegis &mdash; live risk overview</h1>
+    <span>{{ request.user.username }} &middot; refreshes automatically</span>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

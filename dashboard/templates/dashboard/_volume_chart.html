@@ -1,0 +1,16 @@
+<div id="volume-chart"
+     hx-get="{% url 'dashboard:volume-partial' %}"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+  <h2>Request volume &mdash; last {{ snapshot.window_minutes }} min</h2>
+  {% if snapshot.volume %}
+  <div class="chart">
+    {% for point in snapshot.volume %}
+    <div class="bar" style="height: {{ point.height_percent|floatformat:0 }}%"
+         title="{{ point.minute|date:'H:i' }} &mdash; {{ point.count }} requests"></div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No traffic yet.</p>
+  {% endif %}
+</div>

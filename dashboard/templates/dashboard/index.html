@@ -1,0 +1,6 @@
+{% extends "dashboard/base.html" %}
+{% block content %}
+<div class="panel">{% include "dashboard/_volume_chart.html" %}</div>
+<div class="panel">{% include "dashboard/_risky_ips.html" %}</div>
+<div class="panel">{% include "dashboard/_events.html" %}</div>
+{% endblock %}

@@ -92,6 +92,16 @@ class DecisionEngine:
         except RedisError as exc:
             logger.warning("Could not record ban: %s", exc)
 
+    def unban(self, identifier: str) -> None:
+        """Manual override (e.g. from the dashboard). Also clears any
+        cached decision, so the next request is scored fresh rather than
+        possibly reusing a stale attack-tier verdict for a few more
+        seconds until the decision cache's own TTL would have expired."""
+        try:
+            self._redis.delete(_ban_key(identifier), _decision_cache_key(identifier))
+        except RedisError as exc:
+            logger.warning("Could not clear ban: %s", exc)
+
     def _cached_decision(self, identifier: str) -> Decision | None:
         try:
             raw = self._redis.get(_decision_cache_key(identifier))

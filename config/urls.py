@@ -4,5 +4,6 @@ from django.urls import include, path
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("aegis_core.urls")),
+    path("dashboard/", include("dashboard.urls")),
 ]
 

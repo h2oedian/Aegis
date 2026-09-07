@@ -1,0 +1,22 @@
+<div id="recent-events"
+     hx-get="{% url 'dashboard:events-partial' %}"
+     hx-trigger="every 15s"
+     hx-swap="outerHTML">
+  <h2>Recent events</h2>
+  {% if snapshot.recent_events %}
+  <table>
+    <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
+    <tbody>
+      {% for event in snapshot.recent_events %}
+      <tr>
+        <td class="mono">{{ event.created_at|date:'Y-m-d H:i:s' }}</td>
+        <td>{{ event.event_type }}</td>
+        <td class="mono">{{ event.payload }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No security events recorded yet.</p>
+  {% endif %}
+</div>

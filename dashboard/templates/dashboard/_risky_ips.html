@@ -1,0 +1,48 @@
+<div id="risky-ips"
+     hx-get="{% url 'dashboard:risky-ips-partial' %}"
+     hx-trigger="every 15s"
+     hx-swap="outerHTML">
+  <h2>High-risk IPs</h2>
+  {% if snapshot.risky_ips %}
+  <table>
+    <thead>
+      <tr><th>IP</th><th>Score</th><th>Requests</th><th>Triggered rules</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for entry in snapshot.risky_ips %}
+      <tr>
+        <td class="mono">{{ entry.ip_address }}</td>
+        <td class="score{% if entry.score >= 80 %} attack{% elif entry.score >= 60 %} risky{% endif %}">
+          {{ entry.score|floatformat:0 }}
+        </td>
+        <td>{{ entry.request_count }}</td>
+        <td>{% for rule in entry.triggered_rules %}<span class="pill">{{ rule }}</span>{% endfor %}</td>
+        <td>{% if entry.banned %}<span class="banned">banned</span>{% else %}&mdash;{% endif %}</td>
+        <td>
+          {% if entry.banned %}
+          <form method="post" action="{% url 'dashboard:unban' %}">
+            {% csrf_token %}
+            <input type="hidden" name="ip_address" value="{{ entry.ip_address }}">
+            <button type="submit" class="unban">Unban</button>
+          </form>
+          {% else %}
+          <form method="post" action="{% url 'dashboard:ban' %}">
+            {% csrf_token %}
+            <input type="hidden" name="ip_address" value="{{ entry.ip_address }}">
+            <button type="submit">Ban</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if snapshot.rule_breakdown %}
+  <p style="margin-top:12px">
+    {% for rule, count in snapshot.rule_breakdown %}<span class="pill">{{ rule }} &times; {{ count }}</span>{% endfor %}
+  </p>
+  {% endif %}
+  {% else %}
+  <p class="empty">Nothing risky in the current window.</p>
+  {% endif %}
+</div>
