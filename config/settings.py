@@ -104,3 +104,14 @@ AEGIS_REDIS_SOCKET_TIMEOUT_SECONDS = float(
 AEGIS_TRUST_PROXY_HEADERS = (
     os.getenv("AEGIS_TRUST_PROXY_HEADERS", "false").lower() == "true"
 )
+
+# Token-bucket rate limiting: bucket size/refill at risk score 0, shrinking
+# down to the "min" values as the score approaches 100.
+AEGIS_RATE_LIMIT_BASE_CAPACITY = float(os.getenv("AEGIS_RATE_LIMIT_BASE_CAPACITY", "60"))
+AEGIS_RATE_LIMIT_BASE_REFILL_PER_SECOND = float(
+    os.getenv("AEGIS_RATE_LIMIT_BASE_REFILL_PER_SECOND", "1")
+)
+AEGIS_RATE_LIMIT_MIN_CAPACITY = float(os.getenv("AEGIS_RATE_LIMIT_MIN_CAPACITY", "3"))
+AEGIS_RATE_LIMIT_MIN_REFILL_PER_SECOND = float(
+    os.getenv("AEGIS_RATE_LIMIT_MIN_REFILL_PER_SECOND", "0.05")
+)

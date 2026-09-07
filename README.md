@@ -116,3 +116,37 @@ result.triggered_rules  # which rules fired, and why
 This engine isn't wired into the request/response cycle yet — that lands with
 the adaptive response layer in Phase 4. For now it's a tested, standalone
 scorer that Phase 3's model-based risk score will later be blended with.
+
+## Rate limiting (token bucket, Redis + Lua)
+
+`aegis_core.rate_limiter.TokenBucketRateLimiter` implements a token bucket by
+hand as a Redis Lua script ([`token_bucket.lua`](aegis_core/scripts/token_bucket.lua)),
+not a ready-made rate-limiting package. The read-refill-decrement-write
+sequence runs as one atomic `EVAL`, so two concurrent requests against the
+same key can't both read a stale token count and both get let through — a
+plain Python read-then-write against Redis would race here.
+
+`bucket_params_for_score` ties the bucket's size and refill rate to the rule
+engine's risk score: at score 0 a client gets the full configured rate; as
+the score climbs toward 100 both shrink toward a configured minimum, so a
+suspicious client is throttled harder without a separate code path.
+
+```python
+from aegis_core.rate_limiter import TokenBucketRateLimiter
+
+limiter = TokenBucketRateLimiter()
+decision = limiter.check_for_risk_score(f"ip:{client_ip}", risk_score)
+decision.allowed            # bool
+decision.remaining_tokens   # tokens left in the bucket
+```
+
+Like request telemetry, this is fail-open: if Redis is unreachable, `check()`
+logs a warning and allows the request rather than taking the API down.
+Defaults (`AEGIS_RATE_LIMIT_BASE_CAPACITY`, `_BASE_REFILL_PER_SECOND`,
+`_MIN_CAPACITY`, `_MIN_REFILL_PER_SECOND`) are environment-configurable, same
+pattern as the request-stream settings above.
+
+The Lua script's atomicity is only meaningful against a real Redis — the test
+suite includes a live test class (`TokenBucketRateLimiterLiveTests`) that
+fires 20 concurrent requests at a 5-token bucket and asserts exactly 5 get
+through; it skips itself automatically when Redis isn't reachable.

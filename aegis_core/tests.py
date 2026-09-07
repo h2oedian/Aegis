@@ -1,16 +1,24 @@
 import csv
 import json
 import tempfile
+import threading
+import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import RedisError
 
 from .models import RequestLog
+from .rate_limiter import TokenBucketRateLimiter, bucket_params_for_score
+from .redis_client import get_redis_client
 from .tasks import consume_request_stream
 
 
@@ -251,3 +259,105 @@ class LabelRequestDatasetCommandTests(TestCase):
         with open(output_path, newline="", encoding="utf-8") as csv_file:
             rows = list(csv.DictReader(csv_file))
         self.assertEqual(len(rows), 1)
+
+
+class RiskScoreBucketParamsTests(unittest.TestCase):
+    def test_zero_score_uses_the_full_bucket(self):
+        capacity, refill_rate = bucket_params_for_score(
+            0,
+            base_capacity=60,
+            base_refill_per_second=1,
+            min_capacity=3,
+            min_refill_per_second=0.05,
+        )
+        self.assertEqual(capacity, 60)
+        self.assertEqual(refill_rate, 1)
+
+    def test_max_score_shrinks_to_the_minimum(self):
+        capacity, refill_rate = bucket_params_for_score(
+            100,
+            base_capacity=60,
+            base_refill_per_second=1,
+            min_capacity=3,
+            min_refill_per_second=0.05,
+        )
+        self.assertAlmostEqual(capacity, 3)
+        self.assertAlmostEqual(refill_rate, 0.05)
+
+    def test_score_is_clamped_to_the_valid_range(self):
+        kwargs = dict(base_capacity=60, base_refill_per_second=1, min_capacity=3, min_refill_per_second=0.05)
+        below_range, _ = bucket_params_for_score(-50, **kwargs)
+        at_zero, _ = bucket_params_for_score(0, **kwargs)
+        above_range, _ = bucket_params_for_score(500, **kwargs)
+        at_hundred, _ = bucket_params_for_score(100, **kwargs)
+        self.assertEqual(below_range, at_zero)
+        self.assertEqual(above_range, at_hundred)
+
+
+class TokenBucketRateLimiterFailOpenTests(TestCase):
+    def test_fails_open_when_redis_is_unavailable(self):
+        redis_client = MagicMock()
+        redis_client.register_script.return_value = MagicMock(
+            side_effect=RedisConnectionError("offline")
+        )
+        limiter = TokenBucketRateLimiter(redis_client=redis_client)
+
+        with self.assertLogs("aegis_core.rate_limiter", level="WARNING"):
+            decision = limiter.check("ip:203.0.113.10", capacity=10, refill_rate=1)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.remaining_tokens, 10)
+
+
+def _redis_reachable():
+    try:
+        return Redis.from_url(settings.REDIS_URL, socket_connect_timeout=0.2).ping()
+    except RedisError:
+        return False
+
+
+@unittest.skipUnless(_redis_reachable(), "Redis is not reachable from this environment")
+class TokenBucketRateLimiterLiveTests(TestCase):
+    """Exercises the Lua script against a real Redis; the atomicity claim
+    that matters here can't be verified against a mock."""
+
+    def setUp(self):
+        self.redis_client = get_redis_client()
+        self.limiter = TokenBucketRateLimiter(
+            redis_client=self.redis_client, key_prefix="aegis:test:ratelimit:"
+        )
+        self.key = f"live-{uuid.uuid4()}"
+
+    def tearDown(self):
+        self.redis_client.delete(f"aegis:test:ratelimit:{self.key}")
+
+    def test_allows_up_to_capacity_then_blocks(self):
+        for _ in range(3):
+            decision = self.limiter.check(self.key, capacity=3, refill_rate=0.0001, now=1_000.0)
+            self.assertTrue(decision.allowed)
+
+        blocked = self.limiter.check(self.key, capacity=3, refill_rate=0.0001, now=1_000.0)
+        self.assertFalse(blocked.allowed)
+
+    def test_tokens_refill_over_time(self):
+        self.limiter.check(self.key, capacity=1, refill_rate=1.0, now=1_000.0)
+        still_empty = self.limiter.check(self.key, capacity=1, refill_rate=1.0, now=1_000.5)
+        self.assertFalse(still_empty.allowed)
+
+        refilled = self.limiter.check(self.key, capacity=1, refill_rate=1.0, now=1_001.1)
+        self.assertTrue(refilled.allowed)
+
+    def test_concurrent_requests_never_exceed_capacity(self):
+        allowed_flags = []
+
+        def hit():
+            decision = self.limiter.check(self.key, capacity=5, refill_rate=0.0001, now=2_000.0)
+            allowed_flags.append(decision.allowed)
+
+        threads = [threading.Thread(target=hit) for _ in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(allowed_flags), 5)
