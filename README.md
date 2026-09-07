@@ -4,6 +4,30 @@ Aegis is an adaptive security layer for Django REST APIs. It collects request
 telemetry, detects suspicious behaviour, calculates a risk score, and applies
 an appropriate response.
 
+## Contents
+
+- [Development stack](#development-stack)
+- [Architecture](#architecture)
+- [Start locally](#start-locally)
+- [Request telemetry](#request-telemetry)
+- [Attack simulator (aegis-sim)](#attack-simulator-aegis-sim)
+- [Labeled dataset generation](#labeled-dataset-generation)
+- [Rule-based detection engine](#rule-based-detection-engine)
+- [Rate limiting (token bucket, Redis + Lua)](#rate-limiting-token-bucket-redis--lua)
+- [Feature extraction](#feature-extraction)
+- [Anomaly model and combined risk score](#anomaly-model-and-combined-risk-score)
+- [Threshold calibration](#threshold-calibration)
+- [Adaptive response layer](#adaptive-response-layer)
+- [Refresh token rotation and theft detection](#refresh-token-rotation-and-theft-detection)
+- [Device binding and impossible travel](#device-binding-and-impossible-travel)
+- [Tamper-evident audit log](#tamper-evident-audit-log)
+- [Attack dashboard](#attack-dashboard)
+- [Load testing and overhead](#load-testing-and-overhead)
+- [Final evaluation](#final-evaluation)
+- [Testing](#testing)
+- [Continuous integration](#continuous-integration)
+- [Connecting a real API (live demo)](#connecting-a-real-api-live-demo)
+
 ## Development stack
 
 - Django and Django REST Framework
@@ -11,11 +35,51 @@ an appropriate response.
 - Redis
 - Celery
 
+## Architecture
+
+```mermaid
+flowchart TB
+    Client(["Client / aegis-sim"])
+
+    subgraph App["Django app (this repo)"]
+        TM["RequestTelemetryMiddleware"]
+        AM["AdaptiveResponseMiddleware"]
+        Views["DRF views<br/>/api/auth/*, /api/health/"]
+        Dash["/dashboard/ (HTMX, staff-only)"]
+    end
+
+    Redis[("Redis<br/>stream, decision cache,<br/>ban + denylist, rate limiter")]
+    Postgres[("PostgreSQL<br/>RequestLog, RefreshTokenRecord,<br/>AuditLog")]
+    Celery["Celery worker<br/>stream consumer"]
+    Engine["RuleEngine + AnomalyModel<br/>-> DecisionEngine"]
+
+    Client -- "HTTP" --> TM --> AM --> Views
+    TM -- "XADD telemetry" --> Redis
+    Celery -- "XREADGROUP, batch" --> Redis
+    Celery -- "bulk_create" --> Postgres
+    AM --> Engine
+    Engine -- "windowed queries" --> Postgres
+    Engine -- "cache / ban / denylist" --> Redis
+    Dash -- "read" --> Postgres
+    Dash -- "read + ban/unban" --> Redis
+```
+
+Telemetry and detection are decoupled by the Redis Stream: the middleware
+never blocks on Postgres, and a Celery worker drains the stream into
+`RequestLog` in the background. `AdaptiveResponseMiddleware` reads that same
+history live (through `RuleEngine`) plus a trained `AnomalyModel` to compute
+a risk score per request, caching the result in Redis so most requests skip
+the expensive path entirely. The dashboard is a read-only view over the same
+Postgres/Redis state everything else already writes to -- no separate
+aggregation pipeline.
+
 ## Start locally
 
-1. Copy `.env.example` to `.env`.
-2. Run `docker compose up --build`.
-3. Open `http://localhost:8000/api/health/`.
+```bash
+cp .env.example .env && docker compose up --build
+```
+
+Then open `http://localhost:8000/api/health/`.
 
 ## Request telemetry
 
@@ -491,3 +555,78 @@ separation looks like," not as a benchmark to cite.
 
 Re-run this against a real `aegis-sim-dataset` campaign (Day 6) over a real
 deployment for numbers worth citing in an actual writeup.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e aegis-sim   # pytest also picks up aegis-sim/tests/ from the repo root
+pytest              # everything
+pytest aegis_rules aegis_core   # just the rule engine and token rotation
+```
+
+The whole suite (Django `TestCase`-based, run via `pytest`/`pytest-django`
+rather than `manage.py test`) needs a real Postgres and Redis reachable via
+`DJANGO_SETTINGS_MODULE=config.settings`'s env vars — run it inside
+`docker compose` (`docker compose exec web pytest`), or point
+`DJANGO_SETTINGS_MODULE` at a settings module with a local database for a
+quick check without the full stack. The live Redis-atomicity tests
+(`TokenBucketRateLimiterLiveTests`) and any test that needs a real Redis
+skip themselves automatically when one isn't reachable.
+
+Switching test runners caught a real bug in the test suite itself:
+`pytest-django` refuses database access from a test that isn't declared as
+using it, and `DecisionEngineTests` was a plain `unittest.TestCase` calling
+`RuleEngine.evaluate()` (which queries `RequestLog`, even against an empty
+table) without Django's `TestCase` wrapping it in a per-test transaction.
+`manage.py test` never enforced that boundary, so it silently worked without
+the isolation Django's `TestCase` provides. Fixed by making it a proper
+Django `TestCase`; `pytest.ini`'s `--reuse-db` keeps re-runs fast locally.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull
+request: spins up Postgres and Redis as service containers (matching the
+real stack, not a local sqlite substitute), installs `aegis-sim` in editable
+mode, runs migrations, then `pytest -v` -- one command for the whole repo,
+since pytest, run from the root, picks up `aegis-sim/tests/` and
+`loadtest/test_measure_overhead.py` alongside every Django app's `tests.py`
+without needing a separate invocation for each.
+
+## Connecting a real API (live demo)
+
+The roadmap's original plan was to run Aegis's live demo in front of a
+separate `Django-Marketplace-API` project. **That project isn't part of this
+session** — I don't have access to it, so nothing below has actually been
+wired up against it; this is a guide for doing that, not a record that it's
+done.
+
+Two ways to connect them, depending on how separate you want to keep them:
+
+**Option A — merge Aegis into the Marketplace project** (simplest, what this
+repo already assumes structurally): add `aegis_core`, `aegis_rules`,
+`aegis_ml`, and `dashboard` to the Marketplace project's `INSTALLED_APPS`;
+copy `AdaptiveResponseMiddleware` and `RequestTelemetryMiddleware` into its
+`MIDDLEWARE` (after its own auth/session middleware, before
+`MessageMiddleware` — see [Architecture](#architecture)); point its
+`REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES` at
+`aegis_core.authentication.FamilyAwareJWTAuthentication`; run
+`python manage.py migrate` there so `RequestLog`/`RefreshTokenRecord`/
+`AuditLog` exist. The Marketplace API's own login view would call
+`aegis_core.tokens.issue_initial_pair` instead of issuing bare SimpleJWT
+tokens, to get rotation and theft detection.
+
+**Option B — keep them as separate deployments sharing infrastructure**: run
+both Django projects against the *same* Postgres and Redis (different
+databases/key prefixes), so `RequestLog` and the decision cache stay
+centralized in Aegis's database while the Marketplace API only carries
+`AdaptiveResponseMiddleware` + `RequestTelemetryMiddleware` in its own
+`MIDDLEWARE` pointed at that shared Postgres/Redis via `DJANGO_SETTINGS_MODULE`
+env vars. This keeps Aegis's dashboard and audit log as the single place
+security state lives across multiple protected APIs, at the cost of a
+network hop for every telemetry write and decision cache lookup.
+
+Either way, `aegis-sim --base-url` and `aegis-sim-dataset --base-url` just
+need to point at wherever the Marketplace API actually listens; nothing
+about traffic generation or dataset labeling assumes the API lives in this
+repo.

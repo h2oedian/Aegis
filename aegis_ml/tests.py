@@ -660,7 +660,13 @@ class DecisionJsonRoundTripTests(unittest.TestCase):
         self.assertEqual(Decision.from_json(decision.to_json()), decision)
 
 
-class DecisionEngineTests(unittest.TestCase):
+class DecisionEngineTests(TestCase):
+    """Django's TestCase, not plain unittest.TestCase: decide() runs
+    RuleEngine.evaluate(), which queries RequestLog even on an empty table,
+    so this needs the DB access (and per-test transaction rollback) Django's
+    TestCase provides -- plain unittest.TestCase only "worked" here because
+    manage.py test doesn't enforce that boundary the way pytest-django does."""
+
     def setUp(self):
         self.redis_client = MagicMock()
         self.redis_client.get.return_value = None
