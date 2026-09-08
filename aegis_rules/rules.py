@@ -117,7 +117,7 @@ def sequential_id_scan_rule(
 
 
 def impossible_travel_rule(
-    user_id: int | None,
+    user_id: int | str | None,
     current_ip: str | None,
     now: datetime,
     *,

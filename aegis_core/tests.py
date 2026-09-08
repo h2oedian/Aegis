@@ -706,8 +706,20 @@ class PeekAccessTokenTests(TestCase):
 
         peeked = peek_access_token(f"Bearer {pair.access}")
 
-        self.assertEqual(peeked.user_id, self.user.pk)
+        self.assertEqual(str(peeked.user_id), str(self.user.pk))
         self.assertEqual(peeked.fingerprint, "device-abc")
+
+    def test_preserves_integer_and_string_user_id_claims(self):
+        # Supported SimpleJWT releases serialize user IDs differently.
+        from rest_framework_simplejwt.settings import api_settings
+
+        for user_id in (self.user.pk, str(self.user.pk)):
+            with self.subTest(user_id=user_id):
+                token = AccessToken.for_user(self.user)
+                token[api_settings.USER_ID_CLAIM] = user_id
+                peeked = peek_access_token(f"Bearer {token}")
+                self.assertEqual(peeked.user_id, user_id)
+                self.assertIs(type(peeked.user_id), type(user_id))
 
     def test_returns_none_for_a_missing_bearer_prefix(self):
         pair = issue_initial_pair(self.user)
