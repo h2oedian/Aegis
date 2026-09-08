@@ -126,7 +126,7 @@ class DecisionEngine:
         ip_address: str | None,
         path: str,
         query_params: Mapping[str, str] | None = None,
-        user_id: int | None = None,
+        user_id: int | str | None = None,
         token_fingerprint: str | None = None,
         request_fingerprint: str | None = None,
         now: datetime | None = None,

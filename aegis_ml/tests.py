@@ -772,7 +772,7 @@ class AdaptiveResponseMiddlewareUnitTests(TestCase):
             AdaptiveResponseMiddleware(lambda req: HttpResponse("ok"))(request)
 
         kwargs = decide.call_args.kwargs
-        self.assertEqual(kwargs["user_id"], user.pk)
+        self.assertEqual(str(kwargs["user_id"]), str(user.pk))
         self.assertEqual(kwargs["token_fingerprint"], "device-abc")
         self.assertEqual(kwargs["request_fingerprint"], expected_request_fingerprint)
 

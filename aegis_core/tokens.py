@@ -105,7 +105,7 @@ def _revoke_family(family_id: str, *, reason: str, jti: str) -> None:
 
 @dataclass(frozen=True)
 class PeekedClaims:
-    user_id: int | None
+    user_id: int | str | None
     fingerprint: str | None
 
 
