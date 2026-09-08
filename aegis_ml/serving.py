@@ -13,7 +13,9 @@ def get_anomaly_model():
 
     Returns None instead of raising when no model has been trained yet, so
     a server that hasn't run `train_anomaly_models` still serves requests --
-    just with the model's contribution to the risk score fixed at 0.
+    using the rule score at full weight. Keep absence distinct from a
+    loaded model's legitimate zero score so the decision engine can choose
+    the appropriate weighting.
     """
     try:
         return joblib.load(settings.AEGIS_ANOMALY_MODEL_PATH)

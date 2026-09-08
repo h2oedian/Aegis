@@ -14,7 +14,7 @@ from aegis_rules.engine import RuleEngine
 
 from .features import extract_features
 from .risk import combined_risk_score
-from .serving import model_score
+from .serving import get_anomaly_model
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +182,18 @@ class DecisionEngine:
             request_fingerprint=request_fingerprint,
             now=now,
         )
-        features = extract_features(ip_address, now) if ip_address else {}
-        model_component = model_score(features) if ip_address else 0.0
-        score = combined_risk_score(rule_result.score, model_component, rule_weight=self._rule_weight)
+        model = get_anomaly_model() if ip_address else None
+        if model is None:
+            # An unavailable model is not a benign model verdict. Preserve
+            # the available rules' full weight and avoid unused DB queries.
+            model_component = 0.0
+            effective_rule_weight = 1.0
+        else:
+            model_component = model.score(extract_features(ip_address, now))
+            effective_rule_weight = self._rule_weight
+        score = combined_risk_score(
+            rule_result.score, model_component, rule_weight=effective_rule_weight
+        )
 
         decision = Decision(
             score=score,
