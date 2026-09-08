@@ -67,6 +67,17 @@ class RefreshTokenRecord(models.Model):
         return f"{self.user_id}:{self.family_id}:{self.jti[:8]}"
 
 
+class AuditLogLock(models.Model):
+    """Internal singleton that serializes appends, even for an empty log."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(id=1), name="aegis_audit_single_lock"),
+        ]
+
+
 class AuditLog(models.Model):
     """A tamper-evident record of security-significant events (token theft,
     an attack blocked, ...). Each row embeds the previous row's ``hash`` in

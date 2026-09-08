@@ -416,9 +416,10 @@ these two risk signals; it never grants access on the strength of that peek
 (`event_type` + `payload` + `created_at` + `previous_hash`, canonical JSON,
 SHA-256) -- so altering or deleting any past row breaks every hash after it.
 The first row chains off a well-known genesis hash (64 zeros). Writing is
-wrapped in `transaction.atomic()` with `select_for_update()` on the current
-tail row, so two concurrent events can't both read the same "previous" hash
-and fork the chain.
+wrapped in `transaction.atomic()` with `select_for_update()` on a stable
+`AuditLogLock` singleton before reading the tail. This serializes concurrent
+appends even when the log is empty. Migration `0008` adds the internal lock
+table without changing any existing audit rows or hashes.
 
 ```bash
 python manage.py verify_audit_log
