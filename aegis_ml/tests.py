@@ -684,8 +684,10 @@ class DecisionEngineTests(TestCase):
         self.assertEqual(cache_key, "aegis:decision:203.0.113.80")
 
     def test_returns_the_cached_decision_without_recomputing(self):
-        cached = Decision(score=90.0, tier=TIER_ATTACK, rule_score=90.0, model_score=0.0)
-        self.redis_client.get.return_value = cached.to_json()
+        cached = self.engine.decide(
+            ip_address="203.0.113.81", path="/api/health/", query_params={}
+        )
+        self.redis_client.get.return_value = self.redis_client.set.call_args.args[1]
 
         with patch("aegis_ml.decision.RuleEngine.evaluate") as evaluate:
             decision = self.engine.decide(
