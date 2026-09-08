@@ -309,7 +309,9 @@ handling, via `aegis_ml.middleware.AdaptiveResponseMiddleware`.
 Per request it computes a `Decision` (`aegis_ml/decision.py`): the rule
 engine's score plus the anomaly model's score (loaded once from
 `AEGIS_ANOMALY_MODEL_PATH`, falling back to rules-only scoring if no model
-has been trained yet), blended by `AEGIS_RULE_WEIGHT`, then classified into
+has been trained yet). With a loaded model the scores are blended by
+`AEGIS_RULE_WEIGHT`; without one, the rule score keeps its full weight and
+unused feature extraction is skipped. The result is classified into
 the roadmap's four tiers:
 
 | Score | Tier | Response |
