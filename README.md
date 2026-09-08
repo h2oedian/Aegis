@@ -322,7 +322,10 @@ the roadmap's four tiers:
 Rule evaluation hits Postgres and model scoring runs a scikit-learn
 estimator, both too slow to redo on every request from the same client, so
 the decision is cached in Redis for `AEGIS_DECISION_CACHE_TTL_SECONDS`
-(default 5s) and reused until it expires. A confirmed attack verdict is
+(default 5s) and reused only when the path, complete query parameters, user,
+and device fingerprints match. Each IP retains just one entry with a digest
+of that context; changed inputs are scored immediately, and raw request
+context is not copied into the cache. A confirmed attack verdict is
 remembered separately and much longer (`AEGIS_BAN_DURATION_SECONDS`, default
 300s) as a ban flag, so a banned IP is rejected on a plain Redis key check --
 no rule/model recomputation at all.

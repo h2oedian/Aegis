@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -63,7 +64,10 @@ class DecisionEngine:
     Rule evaluation hits Postgres and model scoring runs a scikit-learn
     estimator -- too slow to redo on every request from the same client, so
     the result is cached in Redis under a short TTL (AEGIS_DECISION_CACHE_TTL_SECONDS)
-    and reused for that IP until it expires. A confirmed attack-tier verdict
+    and reused only for matching request context until it expires. Each IP
+    retains one cache entry, tagged with a digest of the scoring inputs, so
+    a changed query, identity, or device cannot inherit a previous verdict.
+    A confirmed attack-tier verdict
     is remembered separately and longer (AEGIS_BAN_DURATION_SECONDS), so a
     banned IP is rejected without recomputing anything at all.
     """
@@ -102,19 +106,29 @@ class DecisionEngine:
         except RedisError as exc:
             logger.warning("Could not clear ban: %s", exc)
 
-    def _cached_decision(self, identifier: str) -> Decision | None:
+    def _cached_decision(self, identifier: str, context: str) -> Decision | None:
         try:
             raw = self._redis.get(_decision_cache_key(identifier))
         except RedisError as exc:
             logger.warning("Decision cache unavailable, recomputing: %s", exc)
             return None
-        return Decision.from_json(raw) if raw else None
+        if not raw:
+            return None
+        try:
+            cached = json.loads(raw)
+            if cached["context"] == context:
+                return Decision(**cached["decision"])
+        except (ValueError, TypeError, KeyError):
+            # Old deployments stored an unqualified Decision. A cache miss
+            # also safely handles incomplete or malformed entries.
+            logger.debug("Ignoring an incompatible decision cache entry")
+        return None
 
-    def _cache_decision(self, identifier: str, decision: Decision) -> None:
+    def _cache_decision(self, identifier: str, decision: Decision, context: str) -> None:
         try:
             self._redis.set(
                 _decision_cache_key(identifier),
-                decision.to_json(),
+                json.dumps({"context": context, "decision": asdict(decision)}),
                 ex=max(1, int(settings.AEGIS_DECISION_CACHE_TTL_SECONDS)),
             )
         except RedisError as exc:
@@ -131,8 +145,30 @@ class DecisionEngine:
         request_fingerprint: str | None = None,
         now: datetime | None = None,
     ) -> Decision:
+        # QueryDict.items()/values() discard repeated query values. Include
+        # every value in the digest without persisting raw request data.
+        query_items = (
+            list(query_params.lists())
+            if hasattr(query_params, "lists")
+            else list((query_params or {}).items())
+        )
+        context = hashlib.sha256(
+            json.dumps(
+                {
+                    "path": path,
+                    "query": sorted(query_items),
+                    "user_id": user_id,
+                    "token_fingerprint": token_fingerprint,
+                    "request_fingerprint": request_fingerprint,
+                    "rule_weight": self._rule_weight,
+                    "now": now.isoformat() if now is not None else None,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         if ip_address:
-            cached = self._cached_decision(ip_address)
+            cached = self._cached_decision(ip_address, context)
             if cached is not None:
                 return cached
 
@@ -157,5 +193,5 @@ class DecisionEngine:
             model_score=model_component,
         )
         if ip_address:
-            self._cache_decision(ip_address, decision)
+            self._cache_decision(ip_address, decision, context)
         return decision
