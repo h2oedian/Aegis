@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone as dt_timezone
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
@@ -70,33 +71,47 @@ def rotate_refresh_token(raw_refresh_token: str) -> TokenPair:
     if not family_id:
         raise TokenTheftDetected("Refresh token is missing its family claim")
 
-    if is_jti_denied(jti) or is_family_revoked(family_id):
-        _revoke_family(family_id, reason="refresh token reuse detected (denylist)", jti=jti)
-        raise TokenTheftDetected(f"Refresh token reuse detected for family {family_id}")
+    with transaction.atomic():
+        # Every generation locks the same retained root record. Locking only
+        # the presented token would still let ancestor replay race with a
+        # descendant's rotation and leave a newly issued token unrevoked.
+        root = (
+            RefreshTokenRecord.objects.select_for_update()
+            .filter(family_id=family_id)
+            .order_by("pk")
+            .first()
+        )
+        reason = None
+        if root is None:
+            reason = "unknown refresh token"
+        elif root.revoked_at is not None or is_jti_denied(jti) or is_family_revoked(family_id):
+            reason = "refresh token reuse detected (revoked family or denylist)"
+        else:
+            record = RefreshTokenRecord.objects.filter(jti=jti, family_id=family_id).first()
+            if record is None:
+                reason = "unknown refresh token"
+            elif record.used_at is not None or record.revoked_at is not None:
+                reason = "refresh token reuse detected"
 
-    try:
-        record = RefreshTokenRecord.objects.get(jti=jti)
-    except RefreshTokenRecord.DoesNotExist:
-        # Signed correctly but unknown to us -- treat it the same as theft.
-        _revoke_family(family_id, reason="unknown refresh token", jti=jti)
-        raise TokenTheftDetected(f"Unknown refresh token for family {family_id}")
+        if reason is not None:
+            _revoke_family(family_id, reason=reason, jti=jti)
+        else:
+            record.used_at = timezone.now()
+            record.save(update_fields=["used_at"])
+            pair = _issue_pair(record.user, family_id, fingerprint=record.fingerprint)
+            transaction.on_commit(lambda: deny_jti(jti))
 
-    if record.used_at is not None or record.revoked_at is not None:
-        _revoke_family(family_id, reason="refresh token reuse detected", jti=jti)
-        raise TokenTheftDetected(f"Refresh token reuse detected for family {family_id}")
-
-    record.used_at = timezone.now()
-    record.save(update_fields=["used_at"])
-    deny_jti(jti)
-
-    return _issue_pair(record.user, family_id, fingerprint=record.fingerprint)
+    # Raising inside atomic() would roll back the revocation we just wrote.
+    if reason is not None:
+        raise TokenTheftDetected(f"{reason} for family {family_id}")
+    return pair
 
 
 def _revoke_family(family_id: str, *, reason: str, jti: str) -> None:
     RefreshTokenRecord.objects.filter(family_id=family_id, revoked_at__isnull=True).update(
         revoked_at=timezone.now()
     )
-    deny_family(family_id)
+    transaction.on_commit(lambda: deny_family(family_id))
     record_event(
         "token_family_revoked",
         {"family_id": family_id, "reason": reason, "jti": jti},
