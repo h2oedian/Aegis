@@ -354,6 +354,12 @@ Every refresh token is single-use, tracked in `RefreshTokenRecord`
 1. issues a new refresh + access pair sharing the same `family_id`, and
 2. marks the old one `used_at`.
 
+Both changes occur in one database transaction. Every rotation locks the
+family's earliest retained refresh record, so concurrent redemption or an
+ancestor replay cannot race a descendant's issuance. Retain that root record
+while the family is in use. Denylist cache writes run only after commit;
+failed issuance leaves the original refresh token available for retry.
+
 Presenting an already-used refresh token -- the signature of a stolen token
 being replayed -- revokes every outstanding token in that family at once,
 `used` or not, denies its `jti`, and returns `401 token_reuse_detected`.
