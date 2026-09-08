@@ -6,7 +6,7 @@ from datetime import datetime
 from django.db import transaction
 from django.utils import timezone
 
-from .models import AuditLog
+from .models import AuditLog, AuditLogLock
 
 GENESIS_HASH = "0" * 64
 
@@ -32,13 +32,16 @@ def compute_hash(event_type: str, payload: dict, created_at: datetime, previous_
 def record_event(event_type: str, payload: dict | None = None) -> AuditLog:
     """Append one tamper-evident row to the audit log.
 
-    Locks the current tail row for the duration of the transaction so two
-    concurrent events can't both read the same "previous" hash and fork the
-    chain -- whoever commits second must have chained off the first's row.
+    Lock a stable singleton before reading the tail. Locking the tail itself
+    cannot protect an empty chain, and a waiting SELECT can retain an old
+    tail from its statement snapshot even after another append commits.
     """
     payload = payload or {}
     with transaction.atomic():
-        tail = AuditLog.objects.select_for_update().order_by("-id").first()
+        # The unique primary key also serializes concurrent first-use
+        # creation. get_or_create retries the locked lookup after a conflict.
+        AuditLogLock.objects.select_for_update().get_or_create(pk=1)
+        tail = AuditLog.objects.order_by("-id").first()
         previous_hash = tail.hash if tail else GENESIS_HASH
         created_at = timezone.now()
         return AuditLog.objects.create(
