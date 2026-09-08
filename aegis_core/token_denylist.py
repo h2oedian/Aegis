@@ -47,10 +47,13 @@ def is_family_revoked(family_id: str) -> bool:
     """Whether every token in this family should be rejected -- checked on
     every authenticated request, so this is deliberately not fail-open:
     revocation is a security boundary, not just an availability nicety.
-    Redis is a cache in front of it; RefreshTokenRecord is authoritative.
+    Redis caches positive revocations; a missing key may mean eviction,
+    expiry, or a failed write, so RefreshTokenRecord remains authoritative
+    on both cache misses and outages.
     """
     try:
-        return bool(get_redis_client().exists(_family_key(family_id)))
+        if get_redis_client().exists(_family_key(family_id)):
+            return True
     except RedisError as exc:
         logger.warning("Family denylist cache unavailable, falling back to the database: %s", exc)
     return RefreshTokenRecord.objects.filter(family_id=family_id, revoked_at__isnull=False).exists()
